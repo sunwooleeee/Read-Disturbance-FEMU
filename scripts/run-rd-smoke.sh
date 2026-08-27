@@ -5,6 +5,11 @@ BUILD_DIR="${BUILD_DIR:-$HOME/FEMU-RD/build-femu}"
 OSIMGF="${OSIMGF:-$HOME/images/u20s.qcow2}"
 QEMU="$BUILD_DIR/qemu-system-x86_64"
 RD_RECLAIM_THRESHOLD="${RD_RECLAIM_THRESHOLD:-0}"
+RD_RECLAIM_POLICY="${RD_RECLAIM_POLICY:-0}"
+RD_PAGES_PER_WL="${RD_PAGES_PER_WL:-3}"
+RD_STRAW_ERC_MAX="${RD_STRAW_ERC_MAX:-0}"
+RD_STRAW_ALPHA_X1000="${RD_STRAW_ALPHA_X1000:-8400}"
+RD_STRAW_CHECK_INTERVAL="${RD_STRAW_CHECK_INTERVAL:-1000}"
 
 if [[ ! -x "$QEMU" ]]; then
     echo "Missing FEMU binary: $QEMU" >&2
@@ -24,6 +29,11 @@ FEMU_OPTIONS+=",pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000"
 FEMU_OPTIONS+=",ch_xfer_lat=0,gc_thres_pcent=75,gc_thres_pcent_high=95"
 FEMU_OPTIONS+=",rd_enable=1,rd_debug=1"
 FEMU_OPTIONS+=",rd_reclaim_threshold=${RD_RECLAIM_THRESHOLD}"
+FEMU_OPTIONS+=",rd_reclaim_policy=${RD_RECLAIM_POLICY}"
+FEMU_OPTIONS+=",rd_pages_per_wl=${RD_PAGES_PER_WL}"
+FEMU_OPTIONS+=",rd_straw_erc_max=${RD_STRAW_ERC_MAX}"
+FEMU_OPTIONS+=",rd_straw_alpha_x1000=${RD_STRAW_ALPHA_X1000}"
+FEMU_OPTIONS+=",rd_straw_check_interval=${RD_STRAW_CHECK_INTERVAL}"
 
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     ACCEL_OPTS=(-accel kvm -cpu host)

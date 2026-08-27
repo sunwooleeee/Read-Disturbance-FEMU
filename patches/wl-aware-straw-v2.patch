@@ -1,0 +1,416 @@
+diff --git a/hw/femu/bbssd/ftl.c b/hw/femu/bbssd/ftl.c
+index c091f977c..7ec62db42 100644
+--- a/hw/femu/bbssd/ftl.c
++++ b/hw/femu/bbssd/ftl.c
+@@ -423,6 +423,16 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
+     spp->rd_reclaim_pages = 0;
+     spp->rd_reclaim_erases = 0;
+     spp->rd_reclaim_deferred = 0;
++    spp->rd_reclaim_policy = n->bb_params.rd_reclaim_policy;
++    spp->rd_pages_per_wl = n->bb_params.rd_pages_per_wl > 0 ? n->bb_params.rd_pages_per_wl : 3;
++    spp->rd_wls_per_blk = (spp->pgs_per_blk + spp->rd_pages_per_wl - 1) / spp->rd_pages_per_wl;
++    spp->rd_straw_erc_max = n->bb_params.rd_straw_erc_max;
++    spp->rd_straw_alpha_x1000 = n->bb_params.rd_straw_alpha_x1000 > 0 ? n->bb_params.rd_straw_alpha_x1000 : 8400;
++    spp->rd_straw_check_interval = n->bb_params.rd_straw_check_interval > 0 ? n->bb_params.rd_straw_check_interval : 1000;
++    spp->rd_straw_reclaim_events = 0;
++    spp->rd_straw_reclaim_wls = 0;
++    spp->rd_straw_reclaim_pages = 0;
++    spp->rd_straw_deferred = 0;
+ 
+     check_params(spp);
+ }
+@@ -448,6 +458,8 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
+     blk->vpc = 0;
+     blk->erase_cnt = 0;
+     blk->read_cnt = 0;
++    blk->n_wls = spp->rd_wls_per_blk;
++    blk->wl_read_cnt = g_malloc0(sizeof(uint64_t) * blk->n_wls);
+     blk->wp = 0;
+ }
+ 
+@@ -828,6 +840,9 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
+     blk->ipc = 0;
+     blk->vpc = 0;
+     blk->read_cnt = 0;
++    if (blk->wl_read_cnt && blk->n_wls > 0) {
++        memset(blk->wl_read_cnt, 0, sizeof(uint64_t) * blk->n_wls);
++    }
+     blk->erase_cnt++;
+ }
+ 
+@@ -1058,6 +1073,148 @@ static int rd_try_reclaim_full_line(struct ssd *ssd, struct ppa *trigger_ppa)
+     return 1;
+ }
+ 
++static inline int rd_pg_to_wl(struct ssd *ssd, int pg)
++{
++    return pg / ssd->sp.rd_pages_per_wl;
++}
++
++static bool rd_wl_has_valid_page(struct ssd *ssd, struct ppa *ppa, int wl)
++{
++    struct ssdparams *spp = &ssd->sp;
++    int first = wl * spp->rd_pages_per_wl;
++    int last = first + spp->rd_pages_per_wl;
++
++    if (last > spp->pgs_per_blk) {
++        last = spp->pgs_per_blk;
++    }
++    for (int pg = first; pg < last; pg++) {
++        ppa->g.pg = pg;
++        if (get_pg(ssd, ppa)->status == PG_VALID) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static double rd_wl_erc(struct ssd *ssd, struct nand_block *blk, int wl)
++{
++    struct ssdparams *spp = &ssd->sp;
++    uint64_t self = blk->wl_read_cnt[wl];
++    uint64_t adj = 0;
++    if (wl > 0) {
++        adj += blk->wl_read_cnt[wl - 1];
++    }
++    if (wl + 1 < blk->n_wls) {
++        adj += blk->wl_read_cnt[wl + 1];
++    }
++
++    uint64_t nonadj = blk->read_cnt;
++    uint64_t excluded = self + adj;
++    if (nonadj > excluded) {
++        nonadj -= excluded;
++    } else {
++        nonadj = 0;
++    }
++
++    double alpha = (double)spp->rd_straw_alpha_x1000 / 1000.0;
++    return alpha * (double)adj + (double)nonadj;
++}
++
++static int rd_reclaim_one_wl(struct ssd *ssd, struct ppa *trigger_ppa,
++                             int wl, double erc)
++{
++    struct ssdparams *spp = &ssd->sp;
++    struct ppa old = *trigger_ppa;
++    int first = wl * spp->rd_pages_per_wl;
++    int last = first + spp->rd_pages_per_wl;
++    int moved = 0;
++
++    if (last > spp->pgs_per_blk) {
++        last = spp->pgs_per_blk;
++    }
++
++    for (int pg = first; pg < last; pg++) {
++        old.g.pg = pg;
++        if (get_pg(ssd, &old)->status != PG_VALID) {
++            continue;
++        }
++        gc_read_page(ssd, &old);
++        gc_write_page(ssd, &old);
++        mark_page_invalid(ssd, &old);
++        set_rmap_ent(ssd, INVALID_LPN, &old);
++        moved++;
++    }
++
++    if (moved > 0) {
++        spp->rd_straw_reclaim_pages += moved;
++        spp->rd_straw_reclaim_wls++;
++        if (spp->rd_debug) {
++            ftl_log("RD STRAW WL reclaim: blk=%d wl=%d erc=%.1f pages=%d total_pages=%" PRIu64 "\n",
++                    trigger_ppa->g.blk, wl, erc, moved,
++                    spp->rd_straw_reclaim_pages);
++            fflush(stdout);
++        }
++    }
++    return moved;
++}
++
++static int rd_try_straw_reclaim(struct ssd *ssd, struct ppa *trigger_ppa)
++{
++    struct ssdparams *spp = &ssd->sp;
++    struct nand_block *blk = get_blk(ssd, trigger_ppa);
++    struct line *line = get_line(ssd, trigger_ppa);
++    int reclaimed_wls = 0;
++    int moved_pages = 0;
++
++    if (!spp->rd_enable || spp->rd_reclaim_policy != 1 ||
++        spp->rd_straw_erc_max <= 0) {
++        return 0;
++    }
++
++    if (line == ssd->wp.curline) {
++        spp->rd_straw_deferred++;
++        return 0;
++    }
++
++    if (spp->rd_straw_check_interval > 1 &&
++        blk->read_cnt % (uint64_t)spp->rd_straw_check_interval != 0) {
++        return 0;
++    }
++
++    for (int wl = 0; wl < blk->n_wls; wl++) {
++        struct ppa probe = *trigger_ppa;
++        double erc;
++
++        if (!rd_wl_has_valid_page(ssd, &probe, wl)) {
++            continue;
++        }
++
++        erc = rd_wl_erc(ssd, blk, wl);
++        if (erc < (double)spp->rd_straw_erc_max) {
++            continue;
++        }
++
++        int moved = rd_reclaim_one_wl(ssd, trigger_ppa, wl, erc);
++        if (moved > 0) {
++            reclaimed_wls++;
++            moved_pages += moved;
++        }
++    }
++
++    if (reclaimed_wls > 0) {
++        spp->rd_straw_reclaim_events++;
++        if (spp->rd_debug) {
++            ftl_log("RD STRAW event: blk=%d reads=%" PRIu64
++                    " wls=%d pages=%d events=%" PRIu64 "\n",
++                    trigger_ppa->g.blk, blk->read_cnt, reclaimed_wls,
++                    moved_pages, spp->rd_straw_reclaim_events);
++            fflush(stdout);
++        }
++    }
++    return moved_pages;
++}
++
++
+ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+ {
+     struct ssdparams *spp = &ssd->sp;
+@@ -1083,9 +1240,15 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+             continue;
+         }
+ 
+-        /* Track host reads to this physical block. This counter is the
+-         * first building block for the read-disturbance stress model. */
+-        get_blk(ssd, &ppa)->read_cnt++;
++        /* Track both block-level reads and the target WL read stream.
++         * For the TLC abstraction, consecutive groups of rd_pages_per_wl
++         * FEMU pages map to one modeled wordline. */
++        struct nand_block *rd_blk = get_blk(ssd, &ppa);
++        int rd_wl = rd_pg_to_wl(ssd, ppa.g.pg);
++        rd_blk->read_cnt++;
++        if (rd_wl >= 0 && rd_wl < rd_blk->n_wls) {
++            rd_blk->wl_read_cnt[rd_wl]++;
++        }
+ 
+         struct nand_cmd srd;
+         srd.type = USER_IO;
+@@ -1094,10 +1257,12 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+         sublat = ssd_advance_status(ssd, &ppa, &srd);
+         maxlat = (sublat > maxlat) ? sublat : maxlat;
+ 
+-        /* Schedule reliability-driven data movement after the triggering read.
+-         * The GC primitives occupy NAND resources; later host I/O observes the
+-         * resulting contention through FEMU's normal LUN timing state. */
+-        rd_try_reclaim_full_line(ssd, &ppa);
++        /* Select one reliability-management policy for A/B comparison. */
++        if (spp->rd_reclaim_policy == 1) {
++            rd_try_straw_reclaim(ssd, &ppa);
++        } else {
++            rd_try_reclaim_full_line(ssd, &ppa);
++        }
+     }
+ 
+     return maxlat;
+diff --git a/hw/femu/bbssd/ftl.h b/hw/femu/bbssd/ftl.h
+index 46aa7848e..a4ccb47ab 100644
+--- a/hw/femu/bbssd/ftl.h
++++ b/hw/femu/bbssd/ftl.h
+@@ -89,6 +89,8 @@ struct nand_block {
+     int vpc; /* valid page count */
+     int erase_cnt;
+     uint64_t read_cnt; /* host-read count since last block erase */
++    uint64_t *wl_read_cnt; /* target-read counts for modeled TLC wordlines */
++    int n_wls;
+     int wp; /* current write pointer */
+ };
+ 
+@@ -153,6 +155,18 @@ struct ssdparams {
+     uint64_t rd_reclaim_erases;
+     uint64_t rd_reclaim_deferred;
+ 
++    /* STRAW-inspired WL-aware read-reclaim controls/statistics. */
++    int rd_reclaim_policy; /* 0=BLOCK, 1=STRAW-inspired WR2 */
++    int rd_pages_per_wl;
++    int rd_wls_per_blk;
++    int rd_straw_erc_max;
++    int rd_straw_alpha_x1000;
++    int rd_straw_check_interval;
++    uint64_t rd_straw_reclaim_events;
++    uint64_t rd_straw_reclaim_wls;
++    uint64_t rd_straw_reclaim_pages;
++    uint64_t rd_straw_deferred;
++
+     /* below are all calculated values */
+     int secs_per_blk; /* # of sectors per block */
+     int secs_per_pl;  /* # of sectors per plane */
+diff --git a/hw/femu/femu.c b/hw/femu/femu.c
+index 8d4fcd41f..3a4effad9 100644
+--- a/hw/femu/femu.c
++++ b/hw/femu/femu.c
+@@ -1027,6 +1027,16 @@ static const Property femu_props[] = {
+     DEFINE_PROP_INT32("rd_debug", FemuCtrl, bb_params.rd_debug, 0),
+     DEFINE_PROP_INT32("rd_reclaim_threshold", FemuCtrl,
+                       bb_params.rd_reclaim_threshold, 0),
++    DEFINE_PROP_INT32("rd_reclaim_policy", FemuCtrl,
++                      bb_params.rd_reclaim_policy, 0),
++    DEFINE_PROP_INT32("rd_pages_per_wl", FemuCtrl,
++                      bb_params.rd_pages_per_wl, 3),
++    DEFINE_PROP_INT32("rd_straw_erc_max", FemuCtrl,
++                      bb_params.rd_straw_erc_max, 0),
++    DEFINE_PROP_INT32("rd_straw_alpha_x1000", FemuCtrl,
++                      bb_params.rd_straw_alpha_x1000, 8400),
++    DEFINE_PROP_INT32("rd_straw_check_interval", FemuCtrl,
++                      bb_params.rd_straw_check_interval, 1000),
+     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
+                      NvmeSubsystem *),
+ };
+diff --git a/hw/femu/nvme.h b/hw/femu/nvme.h
+index 17ce53a04..9b04ae4e8 100644
+--- a/hw/femu/nvme.h
++++ b/hw/femu/nvme.h
+@@ -1525,7 +1525,12 @@ typedef struct BbCtrlParams {
+     /* Read-disturbance model controls (BlackBox SSD mode). */
+     int rd_enable;
+     int rd_debug;
+-    int rd_reclaim_threshold; /* 0 disables read reclaim */
++    int rd_reclaim_threshold; /* 0 disables BLOCK read reclaim */
++    int rd_reclaim_policy; /* 0=BLOCK, 1=STRAW-inspired WR2 */
++    int rd_pages_per_wl; /* TLC abstraction: 3 pages per WL by default */
++    int rd_straw_erc_max;
++    int rd_straw_alpha_x1000;
++    int rd_straw_check_interval;
+ } BbCtrlParams;
+ 
+ typedef struct ZNSCtrlParams {
+diff --git a/hw/femu/scripts/check-wl-erc.py b/hw/femu/scripts/check-wl-erc.py
+new file mode 100755
+index 000000000..443db3c22
+--- /dev/null
++++ b/hw/femu/scripts/check-wl-erc.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++"""Check the V2 TLC page-to-WL mapping and STRAW-inspired ERC smoke setup."""
++
++PAGES_PER_WL = 3
++PAGES_PER_BLOCK = 256
++TARGET_PAGE = 30
++ALPHA = 8.4
++ERC_MAX = 2150.0
++CHECK_INTERVAL = 1
++
++
++def wl_of(page):
++    return page // PAGES_PER_WL
++
++
++def erc(victim_wl, reads_by_wl, total_reads):
++    self_reads = reads_by_wl.get(victim_wl, 0)
++    adj = reads_by_wl.get(victim_wl - 1, 0) + reads_by_wl.get(victim_wl + 1, 0)
++    nonadj = max(total_reads - self_reads - adj, 0)
++    return ALPHA * adj + nonadj
++
++
++target_wl = wl_of(TARGET_PAGE)
++print(f"pages_per_block={PAGES_PER_BLOCK} pages_per_wl={PAGES_PER_WL} modeled_wls={(PAGES_PER_BLOCK + PAGES_PER_WL - 1)//PAGES_PER_WL}")
++print(f"target_page={TARGET_PAGE} target_wl={target_wl} adjacent_victims={target_wl-1},{target_wl+1}")
++first_trigger = None
++for reads in range(1, 1000):
++    counts = {target_wl: reads}
++    victim_erc = erc(target_wl - 1, counts, reads)
++    if victim_erc >= ERC_MAX:
++        first_trigger = reads
++        break
++
++print(f"first_trigger_reads={first_trigger}")
++for reads in (1, 100, 176, 177, 255, 256):
++    counts = {target_wl: reads}
++    left = erc(target_wl - 1, counts, reads)
++    far = erc(target_wl - 3, counts, reads)
++    print(f"reads={reads:3d} adjacent_erc={left:7.1f} far_erc={far:7.1f}")
++
++assert first_trigger == 256
++assert wl_of(30) == 10
++assert wl_of(29) == 9
++assert wl_of(32) == 10
++print("CHECK=PASS")
+diff --git a/hw/femu/scripts/guest-wl-policy-smoke.sh b/hw/femu/scripts/guest-wl-policy-smoke.sh
+new file mode 100755
+index 000000000..9e3df25e4
+--- /dev/null
++++ b/hw/femu/scripts/guest-wl-policy-smoke.sh
+@@ -0,0 +1,35 @@
++#!/bin/bash
++set -euo pipefail
++
++DEV="${1:-/dev/nvme0n1}"
++FILL_PAGES="${2:-256}"
++TARGET_PAGE="${3:-30}"
++READS="${4:-256}"
++
++if [[ "$(id -u)" -ne 0 ]]; then
++    echo "Run with sudo: sudo $0 [device] [fill_pages] [target_page] [reads]" >&2
++    exit 1
++fi
++if [[ ! -b "$DEV" ]]; then
++    echo "Block device not found: $DEV" >&2
++    exit 1
++fi
++if (( TARGET_PAGE < 0 || TARGET_PAGE >= FILL_PAGES )); then
++    echo "target_page must be inside the filled range" >&2
++    exit 1
++fi
++
++echo "WARNING: overwriting the first $((FILL_PAGES * 4)) KiB of $DEV."
++dd if=/dev/zero of="$DEV" bs=4096 count="$FILL_PAGES" \
++   oflag=direct conv=fsync status=none
++echo "Reading 4 KiB page $TARGET_PAGE from $DEV for $READS iterations."
++start_ns=$(date +%s%N)
++for _ in $(seq 1 "$READS"); do
++    dd if="$DEV" of=/dev/null bs=4096 skip="$TARGET_PAGE" count=1 \
++       iflag=direct status=none
++done
++end_ns=$(date +%s%N)
++elapsed_ns=$((end_ns - start_ns))
++
++printf 'Completed: fill_pages=%d target_page=%d reads=%d elapsed_ns=%d device=%s\n' \
++       "$FILL_PAGES" "$TARGET_PAGE" "$READS" "$elapsed_ns" "$DEV"
+diff --git a/hw/femu/scripts/run-rd-smoke.sh b/hw/femu/scripts/run-rd-smoke.sh
+index e013a2645..fbfffe6ca 100755
+--- a/hw/femu/scripts/run-rd-smoke.sh
++++ b/hw/femu/scripts/run-rd-smoke.sh
+@@ -5,6 +5,11 @@ BUILD_DIR="${BUILD_DIR:-$HOME/FEMU-RD/build-femu}"
+ OSIMGF="${OSIMGF:-$HOME/images/u20s.qcow2}"
+ QEMU="$BUILD_DIR/qemu-system-x86_64"
+ RD_RECLAIM_THRESHOLD="${RD_RECLAIM_THRESHOLD:-0}"
++RD_RECLAIM_POLICY="${RD_RECLAIM_POLICY:-0}"
++RD_PAGES_PER_WL="${RD_PAGES_PER_WL:-3}"
++RD_STRAW_ERC_MAX="${RD_STRAW_ERC_MAX:-0}"
++RD_STRAW_ALPHA_X1000="${RD_STRAW_ALPHA_X1000:-8400}"
++RD_STRAW_CHECK_INTERVAL="${RD_STRAW_CHECK_INTERVAL:-1000}"
+ 
+ if [[ ! -x "$QEMU" ]]; then
+     echo "Missing FEMU binary: $QEMU" >&2
+@@ -24,6 +29,11 @@ FEMU_OPTIONS+=",pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000"
+ FEMU_OPTIONS+=",ch_xfer_lat=0,gc_thres_pcent=75,gc_thres_pcent_high=95"
+ FEMU_OPTIONS+=",rd_enable=1,rd_debug=1"
+ FEMU_OPTIONS+=",rd_reclaim_threshold=${RD_RECLAIM_THRESHOLD}"
++FEMU_OPTIONS+=",rd_reclaim_policy=${RD_RECLAIM_POLICY}"
++FEMU_OPTIONS+=",rd_pages_per_wl=${RD_PAGES_PER_WL}"
++FEMU_OPTIONS+=",rd_straw_erc_max=${RD_STRAW_ERC_MAX}"
++FEMU_OPTIONS+=",rd_straw_alpha_x1000=${RD_STRAW_ALPHA_X1000}"
++FEMU_OPTIONS+=",rd_straw_check_interval=${RD_STRAW_CHECK_INTERVAL}"
+ 
+ if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+     ACCEL_OPTS=(-accel kvm -cpu host)

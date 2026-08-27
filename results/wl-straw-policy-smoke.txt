@@ -1,0 +1,17 @@
+WL-aware A/B smoke test - STRAW-inspired policy
+Date: 2026-08-27
+Configuration: policy=STRAW-inspired, pages_per_wl=3, alpha=8.4, ERC_MAX=2150, check_interval=8, 1ch/1LUN, 256 pages/block
+Workload: fill 256 pages, repeatedly read physical target page 30 (modeled WL10) for 256 reads
+
+Observed runtime markers:
+RD retry: blk=0 pg=30 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+RD STRAW WL reclaim: blk=0 wl=9 erc=2150.4 pages=3 total_pages=3
+RD STRAW WL reclaim: blk=0 wl=11 erc=2150.4 pages=3 total_pages=6
+RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
+
+Interpretation:
+- The first ECC/read-retry boundary remains RC=177 under the shared RBER model.
+- Repeated reads to modeled WL10 raise ERC for adjacent victim WL9 and WL11.
+- At read 256, both adjacent WLs cross ERC_MAX=2150 and are selectively migrated.
+- 6 valid pages are copied in total (3 pages per modeled TLC WL).
+- No immediate block erase is performed by the STRAW-inspired policy; the old pages are invalidated and normal GC can reclaim the block later.

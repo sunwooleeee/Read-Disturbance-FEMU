@@ -1,0 +1,7 @@
+WL-aware A/B smoke test - BLOCK policy
+Date: 2026-08-27
+Configuration: policy=BLOCK, block_reclaim_threshold=256, 1ch/1LUN, 256 pages/block
+Workload: fill 256 pages, repeatedly read physical target page 30 for 256 reads
+
+fvm login: [FEMU] FTL-Log: RD retry: blk=0 pg=30 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+[FEMU] FTL-Log: RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1

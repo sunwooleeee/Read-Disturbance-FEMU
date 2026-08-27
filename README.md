@@ -1,102 +1,133 @@
 # Read-Disturbance-FEMU
 
-A focused prototype for modeling the system-level performance impact of NAND read disturbance in FEMU.
+FEMU prototype for studying how NAND read-disturbance management creates internal SSD work and host-visible delay.
 
-The project starts from a clean `MoatLab/FEMU` baseline and adds reliability mechanisms incrementally rather than using a full reliability artifact as the base.
+This branch extends the validated block-level V1 with a STRAW-inspired wordline-aware reclaim policy.
 
-## Research question
+## Motivation
 
-How can read disturbance be represented in FEMU so that SSD-internal reliability-management overhead becomes visible at the host level?
+The 2026 study *Experimental Study on System-Level Performance Impact of Read Disturbance in Modern SSDs* shows that read-disturbance management can strongly affect real SSD performance and points to more realistic SSD simulation as a useful direction.
 
-Current V1 path:
+V1 added the basic path to clean FEMU:
 
-`host read -> physical read count -> RBER estimate -> ECC threshold -> read retry -> reliability-triggered reclaim -> internal NAND I/O`
+`host read -> block read count -> RBER -> ECC threshold -> read retry -> block/line reclaim`
 
-The current V1 includes GC-backed read reclaim. WL-aware aggressor/victim modeling and policy comparison remain future extensions.
+V2 asks a narrower question: when read stress is uneven across wordlines, how much internal data movement can be avoided by reclaiming only the stressed wordlines?
 
-## Baseline
+STRAW is used as the reference for the WL-aware stress idea. This is not a full STRAW reproduction.
 
-- Upstream: `MoatLab/FEMU`
-- Baseline commit: `e2d5413ffe432d0b3ed6fef025c611c630e0cded`
-- Local development branch: `rd-model`
-- Previous Hot/Cold FTL experiments are kept separate from this project.
+References:
+- Experimental Study on System-Level Performance Impact of Read Disturbance in Modern SSDs: https://arxiv.org/abs/2608.14073
+- STRAW, ASPLOS 2026: DOI 10.1145/3779212.3790228
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Host READ] --> B[LPN to PPA]
+    B --> C[Physical page]
+    C --> D[Block read count]
+    C --> E[Modeled TLC wordline]
+    E --> F[Per-WL read counters]
+    D --> G[RBER / ECC]
+    G --> H[Read retry latency]
+    F --> I[ERC: adjacent vs non-adjacent stress]
+    I --> J{Reclaim policy}
+    J -->|BLOCK| K[Full-line migration + erase]
+    J -->|STRAW-inspired| L[Selective WL page migration]
+    K --> M[Internal NAND I/O]
+    L --> M
+    H --> N[Host-visible latency]
+    M --> N
+```
+
+## WL mapping and ERC
+
+The smoke geometry has 256 FEMU pages per block. V2 uses a simple TLC abstraction with three FEMU pages per modeled WL:
+
+`wl = physical_page / 3`
+
+For victim WL `i`:
+
+`adj = RC[i-1] + RC[i+1]`
+
+`nonadj = block_RC - RC[i] - adj`
+
+`ERC[i] = alpha * adj + nonadj`
+
+The default `alpha` is 8.4. `ERC_MAX` remains configurable because this project does not contain STRAW's complete device-characterization tables.
 
 ## Implemented
 
-1. **Physical NAND block read counting**
-   - Added `read_cnt` to `struct nand_block`.
-   - Incremented it after LPN-to-PPA translation on host reads.
-   - Reset it when the block is erased.
+- Per-block and per-WL read counters.
+- FEMU physical-page to modeled-WL mapping.
+- STRAW-inspired ERC calculation.
+- Policy switch: `BLOCK` or `STRAW-inspired`.
+- Selective migration of valid pages on WLs that cross `ERC_MAX`.
+- Existing RBER/ECC/read-retry model shared by both policies.
+- Runtime controls for WL size, alpha, ERC threshold, and check interval.
 
-2. **RBER / ECC / read-retry abstraction**
-   - Uses `RBER = epsilon + alpha * EC^k + gamma * EC^p * RC^q`.
-   - `RC` is FEMU's measured block `read_cnt`.
-   - ECC strength is modeled as 50 raw-bit errors per 4 KiB page.
-   - Retry starts when `page_bits * RBER` exceeds the ECC strength.
-   - Each retry adds one NAND page-read latency.
+## Controlled A/B smoke test
 
-3. **GC-backed read reclaim**
-   - Adds configurable `rd_reclaim_threshold`.
-   - Reliability logic chooses the stressed line directly; normal GC victim selection is not used.
-   - Reuses FEMU's existing `clean_one_block()`, `gc_read_page()`, and `gc_write_page()` migration path.
-   - After migration, the old line is erased and returned to the free list.
-   - Tracks reclaim events, migrated pages, erases, and deferred threshold hits.
+Both policies used the same 1-channel / 1-LUN geometry. One 256-page line was filled, then physical page 30 (modeled WL10) was read 256 times with direct I/O.
 
-4. **Runtime controls**
-   - `rd_enable=0/1`: disable or enable the reliability model.
-   - `rd_debug=0/1`: emit sampled retry/reclaim diagnostics.
-   - `rd_reclaim_threshold=N`: reclaim threshold; `0` disables reclaim.
+BLOCK configuration:
+- reclaim threshold: 256 block reads
+- migrated pages: 256
+- immediate erases: 1
 
-The model is disabled by default so baseline FEMU behavior remains available for A/B comparison.
+STRAW-inspired configuration:
+- 3 pages per modeled WL
+- `alpha = 8.4`
+- `ERC_MAX = 2150`
+- check interval: 8 reads
+- adjacent victims: WL9 and WL11
+- migrated pages: 6 total
+- immediate erases: 0
 
-## Validation status
-
-- FEMU incremental build: **PASS**
-- QEMU FEMU properties: **PASS** (`rd_enable`, `rd_debug`, `rd_reclaim_threshold`)
-- Guest boot and NVMe enumeration: **PASS**
-- Repeated-read trigger of RD retry: **PASS**
-- First retry boundary under current prototype parameters: **RC = 177**
-- GC-backed read reclaim: **PASS** at `RC = 256` in the current smoke configuration
-
-The retry smoke test ran with KVM acceleration. The first retry was logged at `reads=177`, matching the standalone checker (`50.005` expected raw-bit errors versus a 50-bit ECC threshold).
-
-The reclaim smoke test first filled one complete 256-page line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`. Reclaim triggered at `reads=256`, migrated all 256 valid pages through the existing GC copy path, and erased the old line.
-
-Observed runtime markers:
+Observed markers:
 
 ```text
-RD retry: blk=0 pg=0 reads=177 erase=0 rber=0.00152603 retries=1 total=1
 RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+RD STRAW WL reclaim: blk=0 wl=9 erc=2150.4 pages=3 total_pages=3
+RD STRAW WL reclaim: blk=0 wl=11 erc=2150.4 pages=3 total_pages=6
+RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
 ```
 
-## Important limitation
+In this controlled smoke case, immediate page copies fell from 256 to 6, a 97.7% reduction. This result validates the difference in management granularity; it is not a reproduction of STRAW's published performance numbers.
 
-This is a system-level reliability abstraction, not a transistor-level NAND model. The current `RC` is block-level read stress.
+The shared ECC model still triggered the first read retry at block RC=177 in both runs.
 
-Read-reclaim V1 operates only on a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred so FEMU's existing line-management invariants are not violated.
+## Limits
 
-Real read disturbance depends on aggressor/victim wordlines and neighboring-cell stress, so WL-aware modeling and calibration to a specific modern 3D NAND device remain future work.
+- The RBER parameters are not calibrated to a specific modern NAND device.
+- The 3-pages-per-WL mapping is a TLC simulator abstraction, not a vendor-specific program order.
+- This branch implements the core ERC/selective-reclaim mechanism, not STRAW's full RPT/REC/PVT structures.
+- Selective WL migration does not immediately erase the source block; old pages are invalidated and normal FEMU GC reclaims the block later.
+- The micro-smoke test demonstrates internal-I/O reduction, not a general host-latency or throughput improvement.
 
-## Reference implementation
+## Files
 
-FAST'24 CVSS FEMU (`ZiyangJiao/FAST24_CVSS_FEMU`) was examined as a reference for reliability parameters and read-retry modeling. This repository does not use that artifact as its base; the relevant mechanisms are reimplemented on clean upstream FEMU.
+- `docs/development-log.md`: V1 implementation history.
+- `docs/wl-aware-design.md`: V2 mapping, ERC, and policy design.
+- `patches/read-disturbance-femu.patch`: focused V1 source changes.
+- `patches/read-reclaim-v1.patch`: V1 GC-backed reclaim addition.
+- `patches/wl-aware-straw-v2.patch`: V2 WL-aware source and smoke-test changes.
+- `results/wl-policy-comparison.txt`: BLOCK vs STRAW-inspired result summary.
+- `results/wl-block-policy-smoke.txt`: BLOCK runtime evidence.
+- `results/wl-straw-policy-smoke.txt`: STRAW-inspired runtime evidence.
+- `scripts/check-wl-erc.py`: deterministic WL/ERC checker.
+- `scripts/guest-wl-policy-smoke.sh`: guest A/B workload.
 
-See `docs/development-log.md` for implementation rationale and `patches/read-disturbance-femu.patch` for the focused source changes.
+## Runtime controls
 
-## Reproducing the current smoke tests
-
-1. Apply `patches/read-disturbance-femu.patch` to the baseline FEMU commit.
-2. Build FEMU and start the small RD-enabled guest with `scripts/run-rd-smoke.sh`.
-3. For retry-only validation, run `sudo scripts/guest-repeated-read.sh /dev/nvme0n1 400` in the guest.
-4. For reclaim validation, run `sudo scripts/guest-rd-reclaim-smoke.sh /dev/nvme0n1 256 400` in the guest.
-5. Check the host FEMU log for `RD retry:` and `RD reclaim:` messages.
-
-The standalone equation check is available as:
-
-```bash
-python3 scripts/check-rd-model.py
+```text
+rd_reclaim_policy=0|1        # 0=BLOCK, 1=STRAW-inspired
+rd_reclaim_threshold=N       # BLOCK trigger
+rd_pages_per_wl=3
+rd_straw_erc_max=N
+rd_straw_alpha_x1000=8400
+rd_straw_check_interval=N
 ```
 
-Expected first retry boundary with the current prototype parameters: `RC=177`.
-
-See `results/runtime-smoke-test.txt` for the retry smoke log, `results/reclaim-smoke-test.txt` for the reclaim validation, and `results/status.txt` for the current validation summary.
+V1 is preserved at tag `rd-v1` in the development tree. The public `main` branch remains the validated V1 artifact; this `wl-aware-straw` branch contains V2.

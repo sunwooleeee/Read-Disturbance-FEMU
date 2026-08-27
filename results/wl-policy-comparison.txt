@@ -1,0 +1,25 @@
+WL-aware read-reclaim mechanism comparison
+Date: 2026-08-27
+Workload: identical full-line setup and 256 direct reads to physical page 30 / modeled WL10
+
+BLOCK policy
+- Trigger: block read_cnt = 256
+- Migrated pages: 256
+- Immediate erases: 1
+- Runtime marker: RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+
+STRAW-inspired WL-aware policy
+- Mapping: 3 FEMU pages per modeled TLC WL
+- Alpha: 8.4
+- ERC_MAX: 2150
+- Check interval: 8 reads
+- Triggered victims: WL9 and WL11, adjacent to aggressor WL10
+- ERC at trigger: 2150.4 for each victim
+- Migrated pages: 6 total
+- Immediate erases: 0
+- Runtime marker: RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
+
+Mechanism-level result
+- Selective page-copy reduction in this smoke case: 256 -> 6 pages (97.7% fewer immediate copies).
+- This is a controlled mechanism validation, not a reproduction of STRAW's published performance numbers.
+- Host-level latency/throughput benefit is not claimed from this micro-smoke test; broader workloads are required for that conclusion.
