@@ -1,0 +1,203 @@
+diff --git a/hw/femu/bbssd/ftl.c b/hw/femu/bbssd/ftl.c
+index c9a3328fd..9c5a6249b 100644
+--- a/hw/femu/bbssd/ftl.c
++++ b/hw/femu/bbssd/ftl.c
+@@ -1,4 +1,5 @@
+ #include "ftl.h"
++#include <math.h>
+ 
+ //#define FEMU_DEBUG_FTL
+ 
+@@ -403,6 +404,20 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
+     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
+     spp->enable_gc_delay = true;
+ 
++    /* Reliability parameters adapted from the FAST'24 CVSS FEMU artifact.
++     * The initial RD prototype uses the published additive RBER form and
++     * actual block read_cnt instead of the artifact's fixed rc=100 path. */
++    spp->rd_enable = n->bb_params.rd_enable != 0;
++    spp->rd_debug = n->bb_params.rd_debug != 0;
++    spp->rd_ecc_strength = 50;
++    spp->rd_epsilon = 0.00148;
++    spp->rd_alpha = 0.000000516375983;
++    spp->rd_k = 2.05;
++    spp->rd_gamma = 0.00000000651773564;
++    spp->rd_p = 0.435025976;
++    spp->rd_q = 1.71;
++    spp->rd_total_retries = 0;
++    spp->rd_retry_events = 0;
+ 
+     check_params(spp);
+ }
+@@ -427,6 +442,7 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
+     blk->ipc = 0;
+     blk->vpc = 0;
+     blk->erase_cnt = 0;
++    blk->read_cnt = 0;
+     blk->wp = 0;
+ }
+ 
+@@ -591,6 +607,43 @@ static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
+     return &(blk->pg[ppa->g.pg]);
+ }
+ 
++static int rd_get_read_retry_count(struct ssd *ssd, struct ppa *ppa,
++                                   double *raw_rber)
++{
++    struct ssdparams *spp = &ssd->sp;
++    struct nand_block *blk = get_blk(ssd, ppa);
++    double ec, rc, rber;
++    int bits_count, retry = 0;
++
++    if (!spp->rd_enable) {
++        if (raw_rber) {
++            *raw_rber = 0.0;
++        }
++        return 0;
++    }
++
++    /* erase_cnt==0 is treated as the first programmed P/E state.  A floor
++     * of one avoids mathematically eliminating the disturbance term. */
++    ec = (double)(blk->erase_cnt > 0 ? blk->erase_cnt : 1);
++    rc = (double)blk->read_cnt;
++    rber = spp->rd_epsilon + spp->rd_alpha * pow(ec, spp->rd_k) +
++           spp->rd_gamma * pow(ec, spp->rd_p) * pow(rc, spp->rd_q);
++    if (rber > 1.0) {
++        rber = 1.0;
++    }
++    if (raw_rber) {
++        *raw_rber = rber;
++    }
++
++    bits_count = spp->secs_per_pg * spp->secsz * 8;
++    while ((double)bits_count * rber > spp->rd_ecc_strength && retry < 16) {
++        /* Initial abstraction: each retry halves effective RBER. */
++        rber /= 2.0;
++        retry++;
++    }
++    return retry;
++}
++
+ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
+         nand_cmd *ncmd)
+ {
+@@ -603,11 +656,30 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
+     uint64_t lat = 0;
+ 
+     switch (c) {
+-    case NAND_READ:
++    case NAND_READ: {
++        int read_retry;
++        double raw_rber = 0.0;
++        struct nand_block *blk = get_blk(ssd, ppa);
++
+         /* read: perform NAND cmd first */
+         nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
+                      lun->next_lun_avail_time;
+-        lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
++        read_retry = rd_get_read_retry_count(ssd, ppa, &raw_rber);
++        if (read_retry > 0) {
++            spp->rd_total_retries += read_retry;
++            spp->rd_retry_events++;
++            if (spp->rd_debug &&
++                (spp->rd_retry_events <= 8 ||
++                 (spp->rd_retry_events & (spp->rd_retry_events - 1)) == 0)) {
++                ftl_log("RD retry: blk=%d pg=%d reads=%" PRIu64
++                        " erase=%d rber=%.8f retries=%d total=%" PRIu64 "\n",
++                        ppa->g.blk, ppa->g.pg, blk->read_cnt, blk->erase_cnt,
++                        raw_rber, read_retry, spp->rd_total_retries);
++                fflush(stdout);
++            }
++        }
++        lun->next_lun_avail_time = nand_stime +
++                                   spp->pg_rd_lat * (1 + read_retry);
+         lat = lun->next_lun_avail_time - cmd_stime;
+ #if 0
+         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
+@@ -620,6 +692,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
+         lat = ch->next_ch_avail_time - cmd_stime;
+ #endif
+         break;
++    }
+ 
+     case NAND_WRITE:
+         /* write: transfer data through channel first */
+@@ -749,6 +822,7 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
+     ftl_assert(blk->npgs == spp->pgs_per_blk);
+     blk->ipc = 0;
+     blk->vpc = 0;
++    blk->read_cnt = 0;
+     blk->erase_cnt++;
+ }
+ 
+@@ -930,6 +1004,10 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+             continue;
+         }
+ 
++        /* Track host reads to this physical block. This counter is the
++         * first building block for the read-disturbance stress model. */
++        get_blk(ssd, &ppa)->read_cnt++;
++
+         struct nand_cmd srd;
+         srd.type = USER_IO;
+         srd.cmd = NAND_READ;
+diff --git a/hw/femu/bbssd/ftl.h b/hw/femu/bbssd/ftl.h
+index 0558c86a3..62e38e75a 100644
+--- a/hw/femu/bbssd/ftl.h
++++ b/hw/femu/bbssd/ftl.h
+@@ -88,6 +88,7 @@ struct nand_block {
+     int ipc; /* invalid page count */
+     int vpc; /* valid page count */
+     int erase_cnt;
++    uint64_t read_cnt; /* host-read count since last block erase */
+     int wp; /* current write pointer */
+ };
+ 
+@@ -134,6 +135,19 @@ struct ssdparams {
+     int gc_thres_lines_high;
+     bool enable_gc_delay;
+ 
++    /* Read-disturbance reliability abstraction. */
++    bool rd_enable;
++    bool rd_debug;
++    int rd_ecc_strength;
++    double rd_epsilon;
++    double rd_alpha;
++    double rd_k;
++    double rd_gamma;
++    double rd_p;
++    double rd_q;
++    uint64_t rd_total_retries;
++    uint64_t rd_retry_events;
++
+     /* below are all calculated values */
+     int secs_per_blk; /* # of sectors per block */
+     int secs_per_pl;  /* # of sectors per plane */
+diff --git a/hw/femu/femu.c b/hw/femu/femu.c
+index 19c1d8f82..21dd2c6d8 100644
+--- a/hw/femu/femu.c
++++ b/hw/femu/femu.c
+@@ -1023,6 +1023,8 @@ static const Property femu_props[] = {
+     DEFINE_PROP_INT32("gc_thres_pcent", FemuCtrl, bb_params.gc_thres_pcent, 75),
+     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
+     DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
++    DEFINE_PROP_INT32("rd_enable", FemuCtrl, bb_params.rd_enable, 0),
++    DEFINE_PROP_INT32("rd_debug", FemuCtrl, bb_params.rd_debug, 0),
+     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
+                      NvmeSubsystem *),
+ };
+diff --git a/hw/femu/nvme.h b/hw/femu/nvme.h
+index e4f84449f..eb1cf82bb 100644
+--- a/hw/femu/nvme.h
++++ b/hw/femu/nvme.h
+@@ -1521,6 +1521,10 @@ typedef struct BbCtrlParams {
+     int gc_thres_pcent;
+     int gc_thres_pcent_high;
+     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
++
++    /* Read-disturbance model controls (BlackBox SSD mode). */
++    int rd_enable;
++    int rd_debug;
+ } BbCtrlParams;
+ 
+ typedef struct ZNSCtrlParams {
