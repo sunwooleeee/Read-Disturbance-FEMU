@@ -1,4 +1,4 @@
-Read-Disturbance FEMU runtime smoke test
+Read-Disturbance FEMU repeated-read runtime validation
 Date: 2026-08-27
 Baseline: MoatLab/FEMU e2d5413ff
 Branch: rd-model

@@ -15,7 +15,7 @@ if [[ ! -b "$DEV" ]]; then
 fi
 
 echo "WARNING: overwriting the first $((FILL_PAGES * 4)) KiB of $DEV."
-# Fill one FEMU line in the 1-channel/1-LUN smoke geometry so it becomes a
+# Fill one FEMU line in the 1-channel/1-LUN validation geometry so it becomes a
 # closed full line that can safely reuse the existing GC migration path.
 dd if=/dev/zero of="$DEV" bs=4096 count="$FILL_PAGES" oflag=direct conv=fsync status=none
 

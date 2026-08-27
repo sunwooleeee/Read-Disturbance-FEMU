@@ -88,9 +88,9 @@ Validation:
 - KVM-accelerated guest boot completed successfully and guest Linux detected `/dev/nvme0n1`.
 - A deterministic model checker predicts the first retry at `RC=177`: `RC=176` gives 49.991 expected raw errors; `RC=177` gives 50.005.
 
-## End-to-end runtime smoke test — PASS
+## End-to-end runtime validation — PASS
 
-The KVM smoke test wrote one 4 KiB page to `/dev/nvme0n1`, then issued 400 direct 4 KiB reads to the same LBA so guest page cache would not hide the device reads.
+The controlled repeated-read workload wrote one 4 KiB page to `/dev/nvme0n1`, then issued 400 direct 4 KiB reads to the same LBA so guest page cache would not hide the device reads.
 
 Observed FEMU log:
 
@@ -129,7 +129,7 @@ Build validation: PASS after the Step-3 source changes.
 
 ## Step 3 validation — GC-backed read reclaim PASS
 
-The reclaim smoke test filled one complete 256-page FEMU line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`.
+The controlled reclaim workload filled one complete 256-page FEMU line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`.
 
 Observed sequence:
 - `read_cnt=177`: first ECC/read-retry event, matching the existing RBER checker.

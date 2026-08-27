@@ -62,11 +62,11 @@ The model is disabled by default so baseline FEMU behavior remains available for
 - Guest boot and NVMe enumeration: **PASS**
 - Repeated-read trigger of RD retry: **PASS**
 - First retry boundary under current prototype parameters: **RC = 177**
-- GC-backed read reclaim: **PASS** at `RC = 256` in the current smoke configuration
+- GC-backed read reclaim: **PASS** at `RC = 256` in the current validation configuration
 
-The retry smoke test ran with KVM acceleration. The first retry was logged at `reads=177`, matching the standalone checker (`50.005` expected raw-bit errors versus a 50-bit ECC threshold).
+The repeated-read runtime validation ran with KVM acceleration. The first retry was logged at `reads=177`, matching the standalone checker (`50.005` expected raw-bit errors versus a 50-bit ECC threshold).
 
-The reclaim smoke test first filled one complete 256-page line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`. Reclaim triggered at `reads=256`, migrated all 256 valid pages through the existing GC copy path, and erased the old line.
+The reclaim validation workload first filled one complete 256-page line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`. Reclaim triggered at `reads=256`, migrated all 256 valid pages through the existing GC copy path, and erased the old line.
 
 Observed runtime markers:
 
@@ -89,7 +89,7 @@ FAST'24 CVSS FEMU (`ZiyangJiao/FAST24_CVSS_FEMU`) was examined as a reference fo
 
 See `docs/development-log.md` for implementation rationale and `patches/read-disturbance-femu.patch` for the focused source changes.
 
-## Reproducing the current smoke tests
+## Reproducing the current validation workloads
 
 1. Apply `patches/read-disturbance-femu.patch` to the baseline FEMU commit.
 2. Build FEMU and start the small RD-enabled guest with `bash scripts/run-rd-smoke.sh`.
@@ -105,4 +105,4 @@ python3 scripts/check-rd-model.py
 
 Expected first retry boundary with the current prototype parameters: `RC=177`.
 
-See `results/runtime-smoke-test.txt` for the retry smoke log, `results/reclaim-smoke-test.txt` for the reclaim validation, and `results/status.txt` for the current validation summary.
+See `results/runtime-smoke-test.txt` for the repeated-read validation log, `results/reclaim-smoke-test.txt` for the reclaim validation log, and `results/status.txt` for the validation summary.

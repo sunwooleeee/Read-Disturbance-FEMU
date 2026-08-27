@@ -15,7 +15,7 @@ if [[ ! -f "$OSIMGF" ]]; then
     exit 1
 fi
 
-# Tiny BlackBox SSD geometry for a focused RD smoke test:
+# Tiny BlackBox SSD geometry for focused RD validation:
 # 1 ch x 1 LUN x 64 blocks x 256 pages x 4 KiB = 64 MiB physical.
 FEMU_OPTIONS="-device femu,devsz_mb=48,namespaces=1,femu_mode=1"
 FEMU_OPTIONS+=",secsz=512,secs_per_pg=8,pgs_per_blk=256,blks_per_pl=64"
@@ -34,7 +34,7 @@ else
 fi
 cd "$BUILD_DIR"
 exec "$QEMU" \
-    -name "FEMU-RD-SMOKE" \
+    -name "FEMU-RD-VALIDATION" \
     "${ACCEL_OPTS[@]}" \
     -smp 2 \
     -m 2G \

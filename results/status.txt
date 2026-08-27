@@ -3,5 +3,5 @@ QEMU properties: PASS
 Guest boot: PASS
 NVMe enumeration: PASS
 Model checker: PASS (first retry at RC=177)
-Runtime repeated-read smoke test: PASS (first retry observed at reads=177)
-GC-backed read reclaim smoke test: PASS (reclaim observed at reads=256; 256 pages migrated; 1 erase)
+Runtime repeated-read validation: PASS (first retry observed at reads=177)
+GC-backed read reclaim validation: PASS (reclaim observed at reads=256; 256 pages migrated; 1 erase)
