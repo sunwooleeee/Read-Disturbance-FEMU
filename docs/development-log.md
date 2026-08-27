@@ -2,7 +2,7 @@
 
 This is a short implementation log for the Read-Disturbance FEMU project. It records what baseline was used, what was changed, and why, so the implementation can be explained and reproduced later.
 
-## Clean FEMU baseline
+## 2026-08-27 — Clean FEMU baseline
 
 - Base repository: `MoatLab/FEMU`
 - Base branch: `master`
@@ -48,9 +48,17 @@ Observed reference behavior includes:
 - Host-read counting at the NAND block level.
 - Read retry modeled as additional NAND read latency.
 
+## Validation milestone after Step 1
+
+- Clean upstream baseline verified.
+- Step-1 code compiled successfully.
+- The existing FEMU guest image was later found at `~/images/u20s.qcow2`; no restoration was needed.
+- Runtime validation continued in Steps 2 and 3 below.
+
 ## Step 2 — RBER, ECC, and read-retry abstraction
 
-Added a configurable reliability path on top of the block read counter. The model is disabled by default and can be enabled with:
+Added a configurable reliability path on top of the block read counter.
+The model is disabled by default and can be enabled with:
 
 `-device femu,...,rd_enable=1,rd_debug=1`
 
@@ -61,27 +69,22 @@ Modified files:
 - `hw/femu/bbssd/ftl.c`: added RBER calculation, ECC threshold check, and retry latency.
 
 Initial RBER form follows the FAST'24 CVSS FEMU reliability artifact:
-
-`RBER = epsilon + alpha * EC^k + gamma * EC^p * RC^q`
-
+`RBER = epsilon + alpha * EC^k + gamma * EC^p * RC^q`.
 Here `RC` is the actual FEMU block `read_cnt`; the reference artifact contains paths where RC is fixed or simplified, so this project explicitly reconnects the formula to the measured block read count for read-disturbance experiments.
 
-Current prototype parameters:
+Model parameters currently match the reference artifact values:
 - ECC correction strength: 50 bits per 4 KiB page.
 - epsilon = 0.00148
 - alpha = 5.16375983e-7, k = 2.05
 - gamma = 6.51773564e-9, p = 0.435025976, q = 1.71
 
-ECC is an abstraction, not an actual BCH/LDPC implementation. The expected number of raw bit errors is `page_bits * RBER`. If that exceeds the ECC strength, effective RBER is halved per retry until the page is considered correctable. Each retry adds one NAND page-read latency, so read latency becomes `pg_rd_lat * (1 + retry_count)`.
+ECC is an abstraction, not an actual BCH/LDPC implementation. The expected number of raw bit errors is `page_bits * RBER`. If that exceeds the ECC strength, one read-retry is added and effective RBER is halved repeatedly until it is correctable. Each retry adds one NAND page-read latency, so read latency becomes `pg_rd_lat * (1 + retry_count)`.
 
 For a block with `erase_cnt == 0`, EC is floored to 1. This is an explicit modeling assumption so that a freshly programmed block still has a non-zero read-disturbance term; it should later be calibrated or replaced by a more detailed wear state.
 
-## Validation
-
+Validation:
 - Incremental FEMU build completed with `BUILD_RC=0`.
 - `qemu-system-x86_64 -device femu,help` exposes `rd_enable` and `rd_debug`.
-- The existing VM image at `~/images/u20s.qcow2` was reused.
-- The smoke runner prefers KVM and falls back to TCG only when KVM is unavailable.
 - KVM-accelerated guest boot completed successfully and guest Linux detected `/dev/nvme0n1`.
 - A deterministic model checker predicts the first retry at `RC=177`: `RC=176` gives 49.991 expected raw errors; `RC=177` gives 50.005.
 
@@ -102,11 +105,47 @@ The runtime first-retry point exactly matches the independent checker at RC=177.
 
 `host read -> physical block read_cnt -> RBER -> ECC threshold -> read retry -> extra NAND read latency`
 
-The result validates the current block-level abstraction only. It does not yet model aggressor/victim wordlines, neighboring-WL stress, read reclaim, or a calibrated modern 3D NAND device model.
+## Step 3 — GC-backed read reclaim (V1)
 
-## Next steps
+Read reclaim reuses FEMU's conventional GC data-movement primitives instead of duplicating migration logic.
 
-1. Add read-reclaim/internal-copy behavior and internal-I/O statistics.
-2. Measure host average/tail latency and throughput under read-intensive workloads.
-3. Refine block-level stress toward WL-aware aggressor/victim modeling.
-4. Compare read-disturbance management policies after the baseline model is stable.
+New control:
+- `rd_reclaim_threshold`: host-read count that triggers reclaim; `0` disables reclaim.
+
+Implementation path:
+`read_cnt threshold -> reliability-selected line -> clean_one_block() -> gc_read_page()/gc_write_page() -> block erase -> mark_line_free()`.
+
+The trigger differs from normal GC: GC selects a victim because free space is low, while RD reclaim selects the line containing the block whose read stress crossed the configured threshold.
+
+FEMU BlackBox allocation is line-based. Therefore V1 only reclaims a **closed full line**. If the threshold is reached while the line is still the active write line or is only partially written, reclaim is deferred rather than forcing an unsafe partial-line erase. This keeps FEMU's existing line/free-list invariants intact.
+
+Added reclaim statistics:
+- `rd_reclaim_events`
+- `rd_reclaim_pages`
+- `rd_reclaim_erases`
+- `rd_reclaim_deferred`
+
+Build validation: PASS after the Step-3 source changes.
+
+## Step 3 validation — GC-backed read reclaim PASS
+
+The reclaim smoke test filled one complete 256-page FEMU line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`.
+
+Observed sequence:
+- `read_cnt=177`: first ECC/read-retry event, matching the existing RBER checker.
+- `read_cnt=256`: the reliability threshold triggered read reclaim for line 0.
+- The reclaim path reused `clean_one_block()`, `gc_read_page()`, and `gc_write_page()` to migrate all 256 valid pages.
+- `mark_block_free()` then reset block state/read stress and the normal NAND erase timing path was executed.
+
+Observed log:
+
+```text
+RD retry: blk=0 pg=0 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+```
+
+This validates the V1 management chain:
+
+`repeated host read -> read stress -> RBER/ECC retry -> reliability-triggered reclaim -> GC-backed page migration -> erase`
+
+Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred to preserve FEMU's line-management invariants. WL-level aggressor/victim modeling and policy-level comparison remain future work.
