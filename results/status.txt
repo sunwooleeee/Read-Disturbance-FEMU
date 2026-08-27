@@ -1,0 +1,6 @@
+Build: PASS
+QEMU properties: PASS
+Guest boot: PASS
+NVMe enumeration: PASS
+Model checker: PASS (first retry at RC=177)
+Runtime repeated-read smoke test: PASS (first retry observed at reads=177)
