@@ -1,20 +1,18 @@
 # Read-Disturbance-FEMU
 
-FEMU prototype for studying how NAND read-disturbance management creates internal SSD work and host-visible delay.
+FEMU prototype for modeling read-disturbance overhead inside an SSD.
 
-This branch extends the validated block-level V1 with a STRAW-inspired wordline-aware reclaim policy.
+The `main` branch contains the validated block-level V1. This branch adds a STRAW-inspired wordline-aware reclaim path for a controlled comparison with the V1 BLOCK policy.
 
 ## Motivation
 
-The 2026 study *Experimental Study on System-Level Performance Impact of Read Disturbance in Modern SSDs* shows that read-disturbance management can strongly affect real SSD performance and points to more realistic SSD simulation as a useful direction.
+The 2026 study *Experimental Study on System-Level Performance Impact of Read Disturbance in Modern SSDs* reports that read-disturbance management can noticeably affect SSD performance and discusses more realistic SSD simulation as one useful direction.
 
-V1 added the basic path to clean FEMU:
+V1 adds this path to clean FEMU:
 
 `host read -> block read count -> RBER -> ECC threshold -> read retry -> block/line reclaim`
 
-V2 asks a narrower question: when read stress is uneven across wordlines, how much internal data movement can be avoided by reclaiming only the stressed wordlines?
-
-STRAW is used as the reference for the WL-aware stress idea. This is not a full STRAW reproduction.
+V2 keeps the same FEMU timing and FTL path, but adds WL-level read counters and selective reclaim. STRAW is used as the reference for the WL-aware stress model. This is not a full STRAW reproduction.
 
 References:
 - Experimental Study on System-Level Performance Impact of Read Disturbance in Modern SSDs: https://arxiv.org/abs/2608.14073
@@ -22,30 +20,17 @@ References:
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    A[Host READ] --> B[LPN to PPA]
-    B --> C[Physical page]
-    C --> D[Block read count]
-    C --> E[Modeled TLC wordline]
-    E --> F[Per-WL read counters]
-    D --> G[RBER / ECC]
-    G --> H[Read retry latency]
-    F --> I[ERC: adjacent vs non-adjacent stress]
-    I --> J{Reclaim policy}
-    J -->|BLOCK| K[Full-line migration + erase]
-    J -->|STRAW-inspired| L[Selective WL page migration]
-    K --> M[Internal NAND I/O]
-    L --> M
-    H --> N[Host-visible latency]
-    M --> N
-```
+![FEMU read-disturbance architecture](figures/architecture-overview.svg)
+
+The block-level path drives the RBER/ECC/read-retry model. The WL-aware path maps physical pages to modeled TLC wordlines, tracks per-WL reads, and calculates ERC for the reclaim decision.
 
 ## WL mapping and ERC
 
-The smoke geometry has 256 FEMU pages per block. V2 uses a simple TLC abstraction with three FEMU pages per modeled WL:
+The smoke geometry has 256 FEMU pages per block. V2 groups three FEMU pages into one modeled TLC wordline:
 
 `wl = physical_page / 3`
+
+![Page-to-WL mapping and disturbance relationship](figures/page-to-wl-mapping.svg)
 
 For victim WL `i`:
 
@@ -55,7 +40,7 @@ For victim WL `i`:
 
 `ERC[i] = alpha * adj + nonadj`
 
-The default `alpha` is 8.4. `ERC_MAX` remains configurable because this project does not contain STRAW's complete device-characterization tables.
+The default `alpha` is 8.4. `ERC_MAX` is configurable because the project does not include STRAW's full device-characterization tables.
 
 ## Implemented
 
@@ -64,7 +49,7 @@ The default `alpha` is 8.4. `ERC_MAX` remains configurable because this project 
 - STRAW-inspired ERC calculation.
 - Policy switch: `BLOCK` or `STRAW-inspired`.
 - Selective migration of valid pages on WLs that cross `ERC_MAX`.
-- Existing RBER/ECC/read-retry model shared by both policies.
+- Shared RBER/ECC/read-retry model for both policies.
 - Runtime controls for WL size, alpha, ERC threshold, and check interval.
 
 ## Controlled A/B smoke test
@@ -85,6 +70,8 @@ STRAW-inspired configuration:
 - migrated pages: 6 total
 - immediate erases: 0
 
+![BLOCK vs STRAW-inspired reclaim](figures/block-vs-straw-reclaim.svg)
+
 Observed markers:
 
 ```text
@@ -94,23 +81,26 @@ RD STRAW WL reclaim: blk=0 wl=11 erc=2150.4 pages=3 total_pages=6
 RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
 ```
 
-In this controlled smoke case, immediate page copies fell from 256 to 6, a 97.7% reduction. This result validates the difference in management granularity; it is not a reproduction of STRAW's published performance numbers.
+In this smoke test, immediate page copies dropped from 256 to 6, or 97.7%. This only validates the difference in reclaim granularity; it is not a reproduction of STRAW's published performance numbers.
 
-The shared ECC model still triggered the first read retry at block RC=177 in both runs.
+The shared ECC model triggered the first read retry at block RC=177 in both runs.
 
 ## Limits
 
 - The RBER parameters are not calibrated to a specific modern NAND device.
 - The 3-pages-per-WL mapping is a TLC simulator abstraction, not a vendor-specific program order.
 - This branch implements the core ERC/selective-reclaim mechanism, not STRAW's full RPT/REC/PVT structures.
-- Selective WL migration does not immediately erase the source block; old pages are invalidated and normal FEMU GC reclaims the block later.
-- The micro-smoke test demonstrates internal-I/O reduction, not a general host-latency or throughput improvement.
+- Selective WL migration does not immediately erase the source block. Old pages are invalidated and normal FEMU GC reclaims the block later.
+- The micro-smoke test shows internal-I/O reduction. It does not establish a general host-latency or throughput improvement.
 
 ## Files
 
-- `docs/development-log.md`: V1 implementation history.
+- `figures/architecture-overview.svg`: V1/V2 data path and reclaim-policy overview.
+- `figures/page-to-wl-mapping.svg`: TLC page-to-WL mapping used by the smoke test.
+- `figures/block-vs-straw-reclaim.svg`: controlled BLOCK vs STRAW-inspired result.
+- `docs/development-log.md`: implementation and validation history.
 - `docs/wl-aware-design.md`: V2 mapping, ERC, and policy design.
-- `patches/read-disturbance-femu.patch`: focused V1 source changes.
+- `patches/read-disturbance-femu.patch`: initial V1 source changes.
 - `patches/read-reclaim-v1.patch`: V1 GC-backed reclaim addition.
 - `patches/wl-aware-straw-v2.patch`: V2 WL-aware source and smoke-test changes.
 - `results/wl-policy-comparison.txt`: BLOCK vs STRAW-inspired result summary.
