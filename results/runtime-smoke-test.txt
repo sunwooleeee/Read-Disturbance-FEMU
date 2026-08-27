@@ -1,0 +1,32 @@
+Read-Disturbance FEMU runtime smoke test
+Date: 2026-08-27
+Baseline: MoatLab/FEMU e2d5413ff
+Branch: rd-model
+
+Configuration:
+- 1 channel, 1 LUN, 64 blocks, 256 pages/block
+- 4 KiB page, 48 MiB logical SSD
+- rd_enable=1, rd_debug=1
+- KVM acceleration
+- Guest detected /dev/nvme0n1 (48 MiB)
+
+Workload:
+- write 1 x 4 KiB page to /dev/nvme0n1
+- issue 400 direct 4 KiB reads to the same LBA
+
+Observed retry logs:
+RD retry: blk=0 pg=1 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+RD retry: blk=0 pg=1 reads=178 erase=0 rber=0.00152647 retries=1 total=2
+RD retry: blk=0 pg=1 reads=179 erase=0 rber=0.00152691 retries=1 total=3
+RD retry: blk=0 pg=1 reads=180 erase=0 rber=0.00152736 retries=1 total=4
+RD retry: blk=0 pg=1 reads=192 erase=0 rber=0.00153282 retries=1 total=16
+RD retry: blk=0 pg=1 reads=208 erase=0 rber=0.00154049 retries=1 total=32
+RD retry: blk=0 pg=1 reads=240 erase=0 rber=0.00155712 retries=1 total=64
+RD retry: blk=0 pg=1 reads=304 erase=0 rber=0.00159528 retries=1 total=128
+
+Independent checker:
+- RC=176 -> estimated raw errors = 49.991, retries=0
+- RC=177 -> estimated raw errors = 50.005, retries=1
+
+Result: PASS
+The runtime first-retry point exactly matches the deterministic model checker at RC=177.
