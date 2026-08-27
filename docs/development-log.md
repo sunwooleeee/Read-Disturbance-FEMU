@@ -2,7 +2,7 @@
 
 This is a short implementation log for the Read-Disturbance FEMU project. It records what baseline was used, what was changed, and why, so the implementation can be explained and reproduced later.
 
-## 2026-08-27 — Clean FEMU baseline
+## Clean FEMU baseline
 
 - Base repository: `MoatLab/FEMU`
 - Base branch: `master`
