@@ -1,25 +1,41 @@
-WL-aware read-reclaim mechanism comparison
+WL-aware policy comparison - runtime smoke test
 Date: 2026-08-27
-Workload: identical full-line setup and 256 direct reads to physical page 30 / modeled WL10
+
+Geometry
+- 1 channel, 1 LUN, 1 plane
+- 64 blocks, 256 pages/block
+- 4 KiB/page
+- TLC abstraction: 3 FEMU pages per modeled WL (86 WLs/block)
+
+Workload
+- Fill one 256-page line.
+- Repeatedly read page 30 (modeled WL 10) for 256 direct reads.
+- The adjacent victim WLs are WL 9 and WL 11.
 
 BLOCK policy
-- Trigger: block read_cnt = 256
-- Migrated pages: 256
-- Immediate erases: 1
-- Runtime marker: RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+- rd_reclaim_policy=0
+- rd_reclaim_threshold=256
+Observed:
+  RD retry: blk=0 pg=30 reads=177 ... retries=1 total=1
+  RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+Result: 256 valid pages migrated and the block was erased.
 
 STRAW-inspired WL-aware policy
-- Mapping: 3 FEMU pages per modeled TLC WL
-- Alpha: 8.4
-- ERC_MAX: 2150
-- Check interval: 8 reads
-- Triggered victims: WL9 and WL11, adjacent to aggressor WL10
-- ERC at trigger: 2150.4 for each victim
-- Migrated pages: 6 total
-- Immediate erases: 0
-- Runtime marker: RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
+- rd_reclaim_policy=1
+- rd_pages_per_wl=3
+- rd_straw_alpha_x1000=8400 (alpha=8.4)
+- rd_straw_erc_max=2150
+- rd_straw_check_interval=8
+Observed:
+  RD STRAW WL reclaim: blk=0 wl=9 erc=2150.4 pages=3 total_pages=3
+  RD STRAW WL reclaim: blk=0 wl=11 erc=2150.4 pages=3 total_pages=6
+  RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
+Result: only the two adjacent victim WLs were reclaimed, for 6 migrated pages total. No immediate block erase was performed by the selective-reclaim path.
 
-Mechanism-level result
-- Selective page-copy reduction in this smoke case: 256 -> 6 pages (97.7% fewer immediate copies).
-- This is a controlled mechanism validation, not a reproduction of STRAW's published performance numbers.
-- Host-level latency/throughput benefit is not claimed from this micro-smoke test; broader workloads are required for that conclusion.
+Comparison
+- BLOCK: 256 migrated pages, 1 erase
+- STRAW-inspired: 6 migrated pages, 0 immediate erase
+- Page-copy reduction in this smoke workload: 250/256 = 97.65625%
+
+Scope
+This is a mechanism-level smoke comparison under a scaled FEMU configuration. It is not a reproduction of STRAW's published performance numbers or a calibrated NAND-device evaluation.
