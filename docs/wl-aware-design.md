@@ -8,18 +8,19 @@ The 2026 study *Experimental Study on System-Level Performance Impact of Read Di
 
 Reference: https://arxiv.org/abs/2608.14073
 
-STRAW shows that read-disturbance stress is heterogeneous across wordlines and that reads to adjacent wordlines can be substantially more damaging than non-adjacent reads. V2 implements the core WL-aware stress idea in FEMU for a controlled policy comparison.
+STRAW shows that read-disturbance stress is heterogeneous across wordlines and that reads to adjacent wordlines can be substantially more damaging than non-adjacent reads. V2 uses a simplified WL-aware stress model inspired by STRAW for a controlled policy comparison in FEMU.
 
 Reference: STRAW, ASPLOS 2026, DOI 10.1145/3779212.3790228
 
 ## V2 scope
 
-This is a STRAW-inspired implementation, not a reproduction of STRAW's full device-characterization tables or RPT/REC/PVT metadata structures.
+This branch uses a simplified STRAW-inspired model. It does not reproduce STRAW's full device-characterization tables or RPT/REC/PVT metadata structures.
 
 The V2 comparison is:
 
 - `BLOCK`: the validated V1 policy that migrates a complete closed line and erases it.
 - `STRAW-inspired`: compute per-WL effective read count (ERC) and migrate only valid pages on WLs whose ERC reaches the configured threshold.
+
 ## FEMU page-to-WL mapping
 
 The smoke-test geometry uses 256 FEMU pages per block. V2 uses a simple TLC abstraction with three FEMU pages per modeled WL:
@@ -27,6 +28,7 @@ The smoke-test geometry uses 256 FEMU pages per block. V2 uses a simple TLC abst
 `wl = physical_page / 3`
 
 Thus pages 0-2 map to WL0, pages 3-5 to WL1, and so on. A 256-page block contains 86 modeled WLs, with the final WL containing one page. This mapping is an explicit simulator abstraction and does not claim to reproduce a vendor-specific NAND program sequence.
+
 ## STRAW-inspired ERC
 
 For victim WL `i`, V2 separates reads into adjacent and non-adjacent sources:
@@ -49,15 +51,17 @@ For the mechanism smoke test:
 - STRAW-inspired: `alpha=8.4`, `ERC_MAX=2150`, check every 8 reads
 - workload: 256 direct 4 KiB reads to page 30
 
-At 256 reads, each adjacent victim reaches ERC 2150.4. The expected first management event is therefore aligned at approximately the same point for both policies.
+At 256 reads, each adjacent victim reaches ERC 2150.4. The thresholds are chosen so that the first management event occurs at approximately the same read count, allowing the migration granularity of the two policies to be compared directly.
 
 The runtime smoke test moved 256 valid pages and erased one block under BLOCK, versus 6 valid pages across the two adjacent WLs with no immediate erase under the STRAW-inspired policy.
+
+This result is specific to the controlled smoke workload. It is not a host-performance result and does not reproduce STRAW's published evaluation numbers.
 
 ## Current limitations
 
 - Block-level RBER parameters are inherited from the V1 reference model and are not calibrated to a specific modern NAND device.
 - The page-to-WL mapping is a TLC abstraction, not a vendor-specific program-order model.
-- V2 implements the core ERC/selective-reclaim mechanism, not STRAW's full RPT/REC/PVT design.
+- V2 implements a simplified ERC/selective-reclaim path, not STRAW's full RPT/REC/PVT design.
 - Selective WL reclaim invalidates migrated old pages and relies on normal FEMU GC to erase the block later.
 
 ## Architecture overview
