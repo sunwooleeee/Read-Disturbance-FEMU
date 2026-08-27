@@ -4,6 +4,7 @@ set -euo pipefail
 BUILD_DIR="${BUILD_DIR:-$HOME/FEMU-RD/build-femu}"
 OSIMGF="${OSIMGF:-$HOME/images/u20s.qcow2}"
 QEMU="$BUILD_DIR/qemu-system-x86_64"
+RD_RECLAIM_THRESHOLD="${RD_RECLAIM_THRESHOLD:-0}"
 
 if [[ ! -x "$QEMU" ]]; then
     echo "Missing FEMU binary: $QEMU" >&2
@@ -22,6 +23,7 @@ FEMU_OPTIONS+=",pls_per_lun=1,luns_per_ch=1,nchs=1"
 FEMU_OPTIONS+=",pg_rd_lat=40000,pg_wr_lat=200000,blk_er_lat=2000000"
 FEMU_OPTIONS+=",ch_xfer_lat=0,gc_thres_pcent=75,gc_thres_pcent_high=95"
 FEMU_OPTIONS+=",rd_enable=1,rd_debug=1"
+FEMU_OPTIONS+=",rd_reclaim_threshold=${RD_RECLAIM_THRESHOLD}"
 
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     ACCEL_OPTS=(-accel kvm -cpu host)
