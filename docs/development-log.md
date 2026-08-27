@@ -1,6 +1,6 @@
 # FEMU Read-Disturbance Development Log
 
-This is a short implementation log for the Read-Disturbance FEMU project. It records what baseline was used, what was changed, and why, so the implementation can be explained and reproduced later.
+This log records the FEMU baseline, implementation changes, and validation decisions used in the project.
 
 ## Clean FEMU baseline
 
@@ -17,7 +17,7 @@ The first goal is not to emulate transistor-level NAND physics. The project mode
 
 `host read -> physical read count / disturbance stress -> RBER estimate -> ECC capability -> read retry -> reclaim/internal I/O -> host latency`
 
-The implementation is being added incrementally so each mechanism can be validated separately.
+The mechanisms were added in stages so each one could be validated separately.
 
 ## Step 1 — NAND block read-count tracking
 
@@ -36,7 +36,7 @@ Changes:
 Reasoning:
 - Read disturbance is accumulated by repeated physical NAND reads, so a physical-location counter is the minimum state required before adding an RBER/retry model.
 - The counter is reset at erase because erase removes the accumulated disturbance state in this abstraction.
-- This first version tracks stress at block granularity. A later WL-aware model can refine the victim/aggressor relationship.
+- V1 tracks stress at block granularity. The `wl-aware-straw` branch adds per-WL counters and an explicit aggressor/victim abstraction.
 
 ## Reference model examined
 
@@ -52,7 +52,7 @@ Observed reference behavior includes:
 
 - Clean upstream baseline verified.
 - Step-1 code compiled successfully.
-- The existing FEMU guest image was later found at `~/images/u20s.qcow2`; no restoration was needed.
+- The existing FEMU guest image was found at `~/images/u20s.qcow2`; no restoration was needed.
 - Runtime validation continued in Steps 2 and 3 below.
 
 ## Step 2 — RBER, ECC, and read-retry abstraction
@@ -80,7 +80,7 @@ Model parameters currently match the reference artifact values:
 
 ECC is an abstraction, not an actual BCH/LDPC implementation. The expected number of raw bit errors is `page_bits * RBER`. If that exceeds the ECC strength, one read-retry is added and effective RBER is halved repeatedly until it is correctable. Each retry adds one NAND page-read latency, so read latency becomes `pg_rd_lat * (1 + retry_count)`.
 
-For a block with `erase_cnt == 0`, EC is floored to 1. This is an explicit modeling assumption so that a freshly programmed block still has a non-zero read-disturbance term; it should later be calibrated or replaced by a more detailed wear state.
+For a block with `erase_cnt == 0`, EC is floored to 1. This is an explicit modeling assumption so that a freshly programmed block still has a non-zero read-disturbance term. The current model is not calibrated to a specific NAND device.
 
 Validation:
 - Incremental FEMU build completed with `BUILD_RC=0`.
@@ -148,4 +148,4 @@ This validates the V1 management chain:
 
 `repeated host read -> read stress -> RBER/ECC retry -> reliability-triggered reclaim -> GC-backed page migration -> erase`
 
-Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred to preserve FEMU's line-management invariants. WL-level aggressor/victim modeling and policy-level comparison remain future work.
+Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred to preserve FEMU's line-management invariants. The separate `wl-aware-straw` branch contains the WL-aware policy comparison.
