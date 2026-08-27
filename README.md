@@ -1,18 +1,24 @@
 # Read-Disturbance-FEMU
 
-A focused prototype for modeling the system-level performance impact of NAND read disturbance in FEMU.
+FEMU prototype for modeling system-level overhead caused by NAND read disturbance.
 
-The project starts from a clean `MoatLab/FEMU` baseline and adds reliability mechanisms incrementally rather than using a full reliability artifact as the base.
+The implementation starts from a clean `MoatLab/FEMU` baseline. Reliability-related state and timing are added directly to the upstream BlackBox SSD path.
 
 ## Research question
 
 How can read disturbance be represented in FEMU so that SSD-internal reliability-management overhead becomes visible at the host level?
 
-Current V1 path:
+V1 path:
 
 `host read -> physical read count -> RBER estimate -> ECC threshold -> read retry -> reliability-triggered reclaim -> internal NAND I/O`
 
-The current V1 includes GC-backed read reclaim. WL-aware aggressor/victim modeling and policy comparison remain future extensions.
+The validated V1 uses block-level read stress and GC-backed reclaim. The WL-aware extension is kept on the separate [`wl-aware-straw`](https://github.com/sunwooleeee/Read-Disturbance-FEMU/tree/wl-aware-straw) branch.
+
+## Architecture
+
+![FEMU Read-Disturbance V1 architecture](figures/v1-architecture.svg)
+
+The block read counter feeds two reliability-management paths. The RBER/ECC path adds read-retry latency, while the reclaim path reuses FEMU's GC migration primitives and creates additional NAND reads, writes, and erase activity.
 
 ## Baseline
 
@@ -71,11 +77,11 @@ RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
 
 ## Important limitation
 
-This is a system-level reliability abstraction, not a transistor-level NAND model. The current `RC` is block-level read stress.
+This is a system-level reliability abstraction, not a transistor-level NAND model. V1 represents read stress with a block-level counter and does not model aggressor/victim wordline relationships.
 
 Read-reclaim V1 operates only on a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred so FEMU's existing line-management invariants are not violated.
 
-Real read disturbance depends on aggressor/victim wordlines and neighboring-cell stress, so WL-aware modeling and calibration to a specific modern 3D NAND device remain future work.
+The RBER parameters are not calibrated to a specific modern 3D NAND device. The separate `wl-aware-straw` branch adds a TLC page-to-WL abstraction and STRAW-inspired ERC/selective reclaim for a controlled policy comparison.
 
 ## Reference implementation
 
@@ -86,9 +92,9 @@ See `docs/development-log.md` for implementation rationale and `patches/read-dis
 ## Reproducing the current smoke tests
 
 1. Apply `patches/read-disturbance-femu.patch` to the baseline FEMU commit.
-2. Build FEMU and start the small RD-enabled guest with `scripts/run-rd-smoke.sh`.
-3. For retry-only validation, run `sudo scripts/guest-repeated-read.sh /dev/nvme0n1 400` in the guest.
-4. For reclaim validation, run `sudo scripts/guest-rd-reclaim-smoke.sh /dev/nvme0n1 256 400` in the guest.
+2. Build FEMU and start the small RD-enabled guest with `bash scripts/run-rd-smoke.sh`.
+3. For retry-only validation, run `sudo bash scripts/guest-repeated-read.sh /dev/nvme0n1 400` in the guest.
+4. For reclaim validation, run `sudo bash scripts/guest-rd-reclaim-smoke.sh /dev/nvme0n1 256 400` in the guest.
 5. Check the host FEMU log for `RD retry:` and `RD reclaim:` messages.
 
 The standalone equation check is available as:
