@@ -1,4 +1,4 @@
-WL-aware A/B smoke test - STRAW-inspired policy
+WL-aware A/B controlled validation - STRAW-inspired policy
 Date: 2026-08-27
 Configuration: policy=STRAW-inspired, pages_per_wl=3, alpha=8.4, ERC_MAX=2150, check_interval=8, 1ch/1LUN, 256 pages/block
 Workload: fill 256 pages, repeatedly read physical target page 30 (modeled WL10) for 256 reads

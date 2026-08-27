@@ -26,7 +26,7 @@ The block-level path drives the RBER/ECC/read-retry model. The WL-aware path map
 
 ## WL mapping and ERC
 
-The smoke geometry has 256 FEMU pages per block. V2 groups three FEMU pages into one modeled TLC wordline:
+The validation geometry has 256 FEMU pages per block. V2 groups three FEMU pages into one modeled TLC wordline:
 
 `wl = physical_page / 3`
 
@@ -42,6 +42,10 @@ For victim WL `i`:
 
 The default `alpha` is 8.4. `ERC_MAX` is configurable because the project does not include STRAW's full device-characterization tables.
 
+![WL-level ERC under repeated reads to WL10](figures/erc-progression.svg)
+
+Under the controlled validation workload, repeated reads to modeled WL10 make the ERC of adjacent victim WL9/WL11 grow as `8.4 * RC`, while a non-adjacent WL grows as `RC`. At `RC=256`, the adjacent-victim ERC reaches `2150.4`, crossing the configured `ERC_MAX=2150`.
+
 ## Implemented
 
 - Per-block and per-WL read counters.
@@ -52,7 +56,7 @@ The default `alpha` is 8.4. `ERC_MAX` is configurable because the project does n
 - Shared RBER/ECC/read-retry model for both policies.
 - Runtime controls for WL size, alpha, ERC threshold, and check interval.
 
-## Controlled A/B smoke test
+## Controlled A/B mechanism validation
 
 Both policies used the same 1-channel / 1-LUN geometry. One 256-page line was filled, then physical page 30 (modeled WL10) was read 256 times with direct I/O.
 
@@ -81,7 +85,7 @@ RD STRAW WL reclaim: blk=0 wl=11 erc=2150.4 pages=3 total_pages=6
 RD STRAW event: blk=0 reads=256 wls=2 pages=6 events=1
 ```
 
-In this smoke test, immediate page copies dropped from 256 to 6, or 97.7%. This only validates the difference in reclaim granularity; it is not a reproduction of STRAW's published performance numbers.
+In this controlled validation workload, immediate page copies dropped from 256 to 6, or 97.7%. This result only demonstrates the difference in reclaim granularity; it is not a reproduction of STRAW's published performance numbers.
 
 The shared ECC model triggered the first read retry at block RC=177 in both runs.
 
@@ -89,25 +93,26 @@ The shared ECC model triggered the first read retry at block RC=177 in both runs
 
 - The RBER parameters are not calibrated to a specific modern NAND device.
 - The 3-pages-per-WL mapping is a TLC simulator abstraction, not a vendor-specific program order.
-- This branch implements the core ERC/selective-reclaim mechanism, not STRAW's full RPT/REC/PVT structures.
+- This branch implements a simplified ERC/selective-reclaim path, not STRAW's full RPT/REC/PVT structures.
 - Selective WL migration does not immediately erase the source block. Old pages are invalidated and normal FEMU GC reclaims the block later.
-- The micro-smoke test shows internal-I/O reduction. It does not establish a general host-latency or throughput improvement.
+- The controlled microbenchmark shows a reduction in immediate internal page migration for this workload. It does not establish a general host-latency or throughput improvement.
 
 ## Files
 
 - `figures/architecture-overview.svg`: V1/V2 data path and reclaim-policy overview.
-- `figures/page-to-wl-mapping.svg`: TLC page-to-WL mapping used by the smoke test.
+- `figures/page-to-wl-mapping.svg`: TLC page-to-WL mapping used by the validation workload.
+- `figures/erc-progression.svg`: ERC progression for adjacent and non-adjacent WLs under repeated reads to WL10.
 - `figures/block-vs-straw-reclaim.svg`: controlled BLOCK vs STRAW-inspired result.
 - `docs/development-log.md`: implementation and validation history.
 - `docs/wl-aware-design.md`: V2 mapping, ERC, and policy design.
 - `patches/read-disturbance-femu.patch`: initial V1 source changes.
 - `patches/read-reclaim-v1.patch`: V1 GC-backed reclaim addition.
-- `patches/wl-aware-straw-v2.patch`: V2 WL-aware source and smoke-test changes.
+- `patches/wl-aware-straw-v2.patch`: V2 WL-aware source and validation-workload changes.
 - `results/wl-policy-comparison.txt`: BLOCK vs STRAW-inspired result summary.
-- `results/wl-block-policy-smoke.txt`: BLOCK runtime evidence.
-- `results/wl-straw-policy-smoke.txt`: STRAW-inspired runtime evidence.
+- `results/wl-block-policy-smoke.txt`: BLOCK runtime evidence from the controlled validation workload.
+- `results/wl-straw-policy-smoke.txt`: STRAW-inspired runtime evidence from the controlled validation workload.
 - `scripts/check-wl-erc.py`: deterministic WL/ERC checker.
-- `scripts/guest-wl-policy-smoke.sh`: guest A/B workload.
+- `scripts/guest-wl-policy-smoke.sh`: guest workload used for the controlled A/B comparison.
 
 ## Runtime controls
 

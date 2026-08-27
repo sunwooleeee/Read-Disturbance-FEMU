@@ -1,4 +1,4 @@
-WL-aware policy comparison - runtime smoke test
+WL-aware policy comparison - controlled runtime validation
 Date: 2026-08-27
 
 Geometry
@@ -35,7 +35,7 @@ Result: only the two adjacent victim WLs were reclaimed, for 6 migrated pages to
 Comparison
 - BLOCK: 256 migrated pages, 1 erase
 - STRAW-inspired: 6 migrated pages, 0 immediate erase
-- Page-copy reduction in this smoke workload: 250/256 = 97.65625%
+- Page-copy reduction in this controlled validation workload: 250/256 = 97.65625%
 
 Scope
-This is a mechanism-level smoke comparison under a scaled FEMU configuration. It is not a reproduction of STRAW's published performance numbers or a calibrated NAND-device evaluation.
+This is a mechanism-level comparison under a scaled, controlled FEMU validation configuration. It is not a reproduction of STRAW's published performance numbers or a calibrated NAND-device evaluation.

@@ -52,7 +52,7 @@ Observed reference behavior includes:
 
 - Clean upstream baseline verified.
 - Step-1 code compiled successfully.
-- The existing FEMU guest image was later found at `~/images/u20s.qcow2`; no restoration was needed.
+- The existing FEMU guest image was found at `~/images/u20s.qcow2`; no restoration was needed.
 - Runtime validation continued in Steps 2 and 3 below.
 
 ## Step 2 — RBER, ECC, and read-retry abstraction
@@ -88,9 +88,9 @@ Validation:
 - KVM-accelerated guest boot completed successfully and guest Linux detected `/dev/nvme0n1`.
 - A deterministic model checker predicts the first retry at `RC=177`: `RC=176` gives 49.991 expected raw errors; `RC=177` gives 50.005.
 
-## End-to-end runtime smoke test — PASS
+## End-to-end runtime validation — PASS
 
-The KVM smoke test wrote one 4 KiB page to `/dev/nvme0n1`, then issued 400 direct 4 KiB reads to the same LBA so guest page cache would not hide the device reads.
+The controlled repeated-read workload wrote one 4 KiB page to `/dev/nvme0n1`, then issued 400 direct 4 KiB reads to the same LBA so guest page cache would not hide the device reads.
 
 Observed FEMU log:
 
@@ -129,7 +129,7 @@ Build validation: PASS after the Step-3 source changes.
 
 ## Step 3 validation — GC-backed read reclaim PASS
 
-The reclaim smoke test filled one complete 256-page FEMU line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`.
+The controlled reclaim workload filled one complete 256-page FEMU line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`.
 
 Observed sequence:
 - `read_cnt=177`: first ECC/read-retry event, matching the existing RBER checker.
@@ -154,8 +154,8 @@ Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshol
 
 V2 adds a simple TLC page-to-WL mapping, per-WL read counters, and a STRAW-inspired effective read count (ERC). The implementation compares the existing BLOCK reclaim path against selective migration of WLs whose ERC crosses the configured threshold.
 
-The controlled runtime test filled one 256-page line and issued 256 direct reads to physical page 30 (modeled WL10). Under BLOCK, the threshold at `read_cnt=256` migrated all 256 valid pages and erased one block. Under the STRAW-inspired policy (`3 pages/WL`, `alpha=8.4`, `ERC_MAX=2150`, check interval 8), adjacent victim WL9 and WL11 each reached ERC 2150.4 and were selectively migrated. Three pages were copied from each WL, for six immediate page copies total, with no immediate block erase.
+The controlled validation workload filled one 256-page line and issued 256 direct reads to physical page 30 (modeled WL10). Under BLOCK, the threshold at `read_cnt=256` migrated all 256 valid pages and erased one block. Under the STRAW-inspired policy (`3 pages/WL`, `alpha=8.4`, `ERC_MAX=2150`, check interval 8), adjacent victim WL9 and WL11 each reached ERC 2150.4 and were selectively migrated. Three pages were copied from each WL, for six immediate page copies total, with no immediate block erase.
 
-This smoke test validates the management-granularity difference: 256 immediate page copies for BLOCK versus 6 for the WL-aware policy (97.7% fewer immediate copies in this controlled case). It does not establish a general host-latency or throughput improvement.
+This mechanism validation shows the difference in management granularity: 256 immediate page copies for BLOCK versus 6 for the WL-aware policy (97.7% fewer immediate copies in this controlled workload). It does not establish a general host-latency or throughput improvement.
 
 The V2 design, assumptions, and architecture are documented in `docs/wl-aware-design.md`.

@@ -1,7 +1,7 @@
 Build: PASS
 QEMU properties: PASS
 Guest boot / NVMe enumeration: PASS
-V1 retry smoke: PASS (first retry at RC=177)
+V1 repeated-read validation: PASS (first retry at RC=177)
 V1 BLOCK reclaim: PASS (256 pages migrated, 1 erase at RC=256)
 WL/ERC checker: PASS (page30 -> WL10; adjacent victims WL9/WL11; ERC=2150.4 at read 256)
 STRAW-inspired selective reclaim: PASS (WL9/WL11, 6 pages total, no immediate erase)

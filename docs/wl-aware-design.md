@@ -23,7 +23,7 @@ The V2 comparison is:
 
 ## FEMU page-to-WL mapping
 
-The smoke-test geometry uses 256 FEMU pages per block. V2 uses a simple TLC abstraction with three FEMU pages per modeled WL:
+The validation geometry uses 256 FEMU pages per block. V2 uses a simple TLC abstraction with three FEMU pages per modeled WL:
 
 `wl = physical_page / 3`
 
@@ -41,11 +41,15 @@ For victim WL `i`, V2 separates reads into adjacent and non-adjacent sources:
 
 The default `alpha` is 8.4 (`rd_straw_alpha_x1000=8400`) to match STRAW's reported average adjacent/non-adjacent disturbance ratio. The ERC threshold remains a configurable simulator parameter because this project does not have the paper's complete per-WL-group, per-PEC characterization tables.
 
-## Controlled A/B smoke test
+![WL-level ERC under repeated reads to WL10](../figures/erc-progression.svg)
+
+For the controlled validation workload, only modeled WL10 is repeatedly read. The ERC of adjacent victim WL9/WL11 therefore grows as `8.4 * RC`, while a non-adjacent WL grows as `RC`. With `ERC_MAX=2150`, the adjacent victims reach `2150.4` at `RC=256`.
+
+## Controlled A/B mechanism validation
 
 Both policies use the same 1-channel / 1-LUN geometry, fill one complete 256-page line, and repeatedly read physical page 30 (modeled WL10). WL9 and WL11 are the adjacent victim WLs.
 
-For the mechanism smoke test:
+Validation configuration:
 
 - BLOCK: `rd_reclaim_threshold=256`
 - STRAW-inspired: `alpha=8.4`, `ERC_MAX=2150`, check every 8 reads
@@ -53,9 +57,9 @@ For the mechanism smoke test:
 
 At 256 reads, each adjacent victim reaches ERC 2150.4. The thresholds are chosen so that the first management event occurs at approximately the same read count, allowing the migration granularity of the two policies to be compared directly.
 
-The runtime smoke test moved 256 valid pages and erased one block under BLOCK, versus 6 valid pages across the two adjacent WLs with no immediate erase under the STRAW-inspired policy.
+The runtime validation moved 256 valid pages and erased one block under BLOCK, versus 6 valid pages across the two adjacent WLs with no immediate erase under the STRAW-inspired policy.
 
-This result is specific to the controlled smoke workload. It is not a host-performance result and does not reproduce STRAW's published evaluation numbers.
+This result is specific to the controlled validation workload. It is not a host-performance result and does not reproduce STRAW's published evaluation numbers.
 
 ## Current limitations
 

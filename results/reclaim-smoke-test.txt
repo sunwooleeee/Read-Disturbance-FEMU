@@ -1,4 +1,4 @@
-Read-Disturbance FEMU read-reclaim smoke test
+Read-Disturbance FEMU read-reclaim validation
 Date: 2026-08-27
 Commit under test: b0a85f681
 

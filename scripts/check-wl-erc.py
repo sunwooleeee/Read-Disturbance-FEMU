@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the V2 TLC page-to-WL mapping and STRAW-inspired ERC smoke setup."""
+"""Check the V2 TLC page-to-WL mapping and STRAW-inspired ERC validation setup."""
 
 PAGES_PER_WL = 3
 PAGES_PER_BLOCK = 256
