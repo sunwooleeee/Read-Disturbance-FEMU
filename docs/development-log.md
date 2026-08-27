@@ -17,7 +17,7 @@ The first goal is not to emulate transistor-level NAND physics. The project mode
 
 `host read -> physical read count / disturbance stress -> RBER estimate -> ECC capability -> read retry -> reclaim/internal I/O -> host latency`
 
-The implementation is being added incrementally so each mechanism can be validated separately.
+The mechanisms were added in stages so each one could be validated independently.
 
 ## Step 1 — NAND block read-count tracking
 
@@ -80,7 +80,7 @@ Model parameters currently match the reference artifact values:
 
 ECC is an abstraction, not an actual BCH/LDPC implementation. The expected number of raw bit errors is `page_bits * RBER`. If that exceeds the ECC strength, one read-retry is added and effective RBER is halved repeatedly until it is correctable. Each retry adds one NAND page-read latency, so read latency becomes `pg_rd_lat * (1 + retry_count)`.
 
-For a block with `erase_cnt == 0`, EC is floored to 1. This is an explicit modeling assumption so that a freshly programmed block still has a non-zero read-disturbance term; it should later be calibrated or replaced by a more detailed wear state.
+For a block with `erase_cnt == 0`, EC is floored to 1. This is an explicit modeling assumption so that a freshly programmed block still has a non-zero read-disturbance term. The current model is not calibrated to a specific NAND device.
 
 Validation:
 - Incremental FEMU build completed with `BUILD_RC=0`.
@@ -148,4 +148,14 @@ This validates the V1 management chain:
 
 `repeated host read -> read stress -> RBER/ECC retry -> reliability-triggered reclaim -> GC-backed page migration -> erase`
 
-Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred to preserve FEMU's line-management invariants. WL-level aggressor/victim modeling and policy-level comparison remain future work.
+Important limitation: V1 reclaims only a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred to preserve FEMU's line-management invariants.
+
+## V2 — WL-aware policy comparison
+
+V2 adds a simple TLC page-to-WL mapping, per-WL read counters, and a STRAW-inspired effective read count (ERC). The implementation compares the existing BLOCK reclaim path against selective migration of WLs whose ERC crosses the configured threshold.
+
+The controlled runtime test filled one 256-page line and issued 256 direct reads to physical page 30 (modeled WL10). Under BLOCK, the threshold at `read_cnt=256` migrated all 256 valid pages and erased one block. Under the STRAW-inspired policy (`3 pages/WL`, `alpha=8.4`, `ERC_MAX=2150`, check interval 8), adjacent victim WL9 and WL11 each reached ERC 2150.4 and were selectively migrated. Three pages were copied from each WL, for six immediate page copies total, with no immediate block erase.
+
+This smoke test validates the management-granularity difference: 256 immediate page copies for BLOCK versus 6 for the WL-aware policy (97.7% fewer immediate copies in this controlled case). It does not establish a general host-latency or throughput improvement.
+
+The V2 design, assumptions, and architecture are documented in `docs/wl-aware-design.md`.
