@@ -1,6 +1,6 @@
 # FEMU Read-Disturbance Development Log
 
-This is a short implementation log for the Read-Disturbance FEMU project. It records what baseline was used, what was changed, and why, so the implementation can be explained and reproduced later.
+This log records the FEMU baseline, implementation changes, and validation decisions used in the project.
 
 ## Clean FEMU baseline
 
@@ -36,7 +36,7 @@ Changes:
 Reasoning:
 - Read disturbance is accumulated by repeated physical NAND reads, so a physical-location counter is the minimum state required before adding an RBER/retry model.
 - The counter is reset at erase because erase removes the accumulated disturbance state in this abstraction.
-- This first version tracks stress at block granularity. A later WL-aware model can refine the victim/aggressor relationship.
+- V1 tracks stress at block granularity. V2 adds per-WL counters and an explicit aggressor/victim abstraction.
 
 ## Reference model examined
 
