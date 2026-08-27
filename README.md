@@ -6,68 +6,90 @@ The project starts from a clean `MoatLab/FEMU` baseline and adds reliability mec
 
 ## Research question
 
-How can read disturbance be represented in FEMU so that SSD-internal reliability management overhead is visible at the host level?
+How can read disturbance be represented in FEMU so that SSD-internal reliability-management overhead becomes visible at the host level?
 
-The current abstraction follows this path:
+Current V1 path:
 
-`host read -> physical read count -> RBER estimate -> ECC threshold -> read retry -> NAND read latency`
+`host read -> physical read count -> RBER estimate -> ECC threshold -> read retry -> reliability-triggered reclaim -> internal NAND I/O`
 
-Read reclaim and finer-grained WL-aware stress modeling are planned extensions.
+The current V1 includes GC-backed read reclaim. WL-aware aggressor/victim modeling and policy comparison remain future extensions.
 
 ## Baseline
 
 - Upstream: `MoatLab/FEMU`
 - Baseline commit: `e2d5413ffe432d0b3ed6fef025c611c630e0cded`
-- Development branch used locally: `rd-model`
-- Existing Hot/Cold FTL experiments are kept separate from this project.
+- Local development branch: `rd-model`
+- Previous Hot/Cold FTL experiments are kept separate from this project.
 
 ## Implemented
 
 1. **Physical NAND block read counting**
    - Added `read_cnt` to `struct nand_block`.
-   - Incremented after LPN-to-PPA translation on host reads.
-   - Reset on block erase.
+   - Incremented it after LPN-to-PPA translation on host reads.
+   - Reset it when the block is erased.
 
 2. **RBER / ECC / read-retry abstraction**
    - Uses `RBER = epsilon + alpha * EC^k + gamma * EC^p * RC^q`.
    - `RC` is FEMU's measured block `read_cnt`.
-   - ECC correction strength is modeled as 50 raw-bit errors per 4 KiB page.
-   - Retry is triggered when `page_bits * RBER` exceeds the correction strength.
+   - ECC strength is modeled as 50 raw-bit errors per 4 KiB page.
+   - Retry starts when `page_bits * RBER` exceeds the ECC strength.
    - Each retry adds one NAND page-read latency.
 
-3. **Runtime controls**
+3. **GC-backed read reclaim**
+   - Adds configurable `rd_reclaim_threshold`.
+   - Reliability logic chooses the stressed line directly; normal GC victim selection is not used.
+   - Reuses FEMU's existing `clean_one_block()`, `gc_read_page()`, and `gc_write_page()` migration path.
+   - After migration, the old line is erased and returned to the free list.
+   - Tracks reclaim events, migrated pages, erases, and deferred threshold hits.
+
+4. **Runtime controls**
    - `rd_enable=0/1`: disable or enable the reliability model.
-   - `rd_debug=0/1`: emit sampled read-retry diagnostics.
+   - `rd_debug=0/1`: emit sampled retry/reclaim diagnostics.
+   - `rd_reclaim_threshold=N`: reclaim threshold; `0` disables reclaim.
 
 The model is disabled by default so baseline FEMU behavior remains available for A/B comparison.
 
 ## Validation status
 
 - FEMU incremental build: **PASS**
-- `qemu-system-x86_64 -device femu,help`: **PASS** (`rd_enable`, `rd_debug` exposed)
-- Guest boot with modified FEMU: **PASS**
-- Guest Linux detects FEMU NVMe device: **PASS**
+- QEMU FEMU properties: **PASS** (`rd_enable`, `rd_debug`, `rd_reclaim_threshold`)
+- Guest boot and NVMe enumeration: **PASS**
 - Repeated-read trigger of RD retry: **PASS**
-- First retry boundary under the current prototype parameters: **RC = 177**
+- First retry boundary under current prototype parameters: **RC = 177**
+- GC-backed read reclaim: **PASS** at `RC = 256` in the current smoke configuration
 
-The final smoke test ran with KVM acceleration. A 4 KiB page was mapped in the FEMU guest, then repeatedly read. The first retry was logged at `reads=177`, matching the standalone model check (`50.005` expected raw-bit errors versus a 50-bit ECC threshold). Sampled logs continued to show increasing retry events through `reads=304`.
+The retry smoke test ran with KVM acceleration. The first retry was logged at `reads=177`, matching the standalone checker (`50.005` expected raw-bit errors versus a 50-bit ECC threshold).
+
+The reclaim smoke test first filled one complete 256-page line, then repeatedly read the same 4 KiB LBA with `rd_reclaim_threshold=256`. Reclaim triggered at `reads=256`, migrated all 256 valid pages through the existing GC copy path, and erased the old line.
+
+Observed runtime markers:
+
+```text
+RD retry: blk=0 pg=0 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+```
 
 ## Important limitation
 
-This is a system-level reliability abstraction, not a transistor-level NAND model. The current `RC` is block-level read stress. Real read disturbance is caused by repeated read operations stressing non-selected cells/wordlines, so a future version should model aggressor/victim WL relationships explicitly.
+This is a system-level reliability abstraction, not a transistor-level NAND model. The current `RC` is block-level read stress.
+
+Read-reclaim V1 operates only on a closed, fully valid FEMU line. Threshold hits on the active or partially written line are deferred so FEMU's existing line-management invariants are not violated.
+
+Real read disturbance depends on aggressor/victim wordlines and neighboring-cell stress, so WL-aware modeling and calibration to a specific modern 3D NAND device remain future work.
 
 ## Reference implementation
 
-FAST'24 CVSS FEMU (`ZiyangJiao/FAST24_CVSS_FEMU`) was examined as a reference for reliability parameters and read-retry modeling. This repository does not use that full artifact as its base; relevant mechanisms are reimplemented on clean upstream FEMU.
+FAST'24 CVSS FEMU (`ZiyangJiao/FAST24_CVSS_FEMU`) was examined as a reference for reliability parameters and read-retry modeling. This repository does not use that artifact as its base; the relevant mechanisms are reimplemented on clean upstream FEMU.
 
-See `docs/development-log.md` for the implementation rationale and `patches/read-disturbance-femu.patch` for the focused source changes.
+See `docs/development-log.md` for implementation rationale and `patches/read-disturbance-femu.patch` for the focused source changes.
 
-## Reproducing the current smoke test
+## Reproducing the current smoke tests
 
 1. Apply `patches/read-disturbance-femu.patch` to the baseline FEMU commit.
 2. Build FEMU and start the small RD-enabled guest with `scripts/run-rd-smoke.sh`.
-3. Inside the guest, run `sudo scripts/guest-repeated-read.sh /dev/nvme0n1 400` after copying the script into the guest.
-4. Check the host FEMU log for `RD retry:` messages.
+3. For retry-only validation, run `sudo scripts/guest-repeated-read.sh /dev/nvme0n1 400` in the guest.
+4. For reclaim validation, run `sudo scripts/guest-rd-reclaim-smoke.sh /dev/nvme0n1 256 400` in the guest.
+5. Check the host FEMU log for `RD retry:` and `RD reclaim:` messages.
 
 The standalone equation check is available as:
 
@@ -77,4 +99,4 @@ python3 scripts/check-rd-model.py
 
 Expected first retry boundary with the current prototype parameters: `RC=177`.
 
-See `results/runtime-smoke-test.txt` for the observed runtime log and `results/status.txt` for the current validation summary.
+See `results/runtime-smoke-test.txt` for the retry smoke log, `results/reclaim-smoke-test.txt` for the reclaim validation, and `results/status.txt` for the current validation summary.
