@@ -1,0 +1,145 @@
+diff --git a/hw/femu/bbssd/ftl.c b/hw/femu/bbssd/ftl.c
+index 9c5a6249b..c091f977c 100644
+--- a/hw/femu/bbssd/ftl.c
++++ b/hw/femu/bbssd/ftl.c
+@@ -418,6 +418,11 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
+     spp->rd_q = 1.71;
+     spp->rd_total_retries = 0;
+     spp->rd_retry_events = 0;
++    spp->rd_reclaim_threshold = n->bb_params.rd_reclaim_threshold;
++    spp->rd_reclaim_events = 0;
++    spp->rd_reclaim_pages = 0;
++    spp->rd_reclaim_erases = 0;
++    spp->rd_reclaim_deferred = 0;
+ 
+     check_params(spp);
+ }
+@@ -979,6 +984,80 @@ static int do_gc(struct ssd *ssd, bool force)
+     return 0;
+ }
+ 
++/*
++ * Read-reclaim V1 reuses the normal GC migration/erase primitives, but the
++ * trigger and victim are reliability-driven. FEMU allocates BlackBox pages
++ * at line granularity, so this first version only reclaims a closed, fully
++ * written line. A threshold hit on the current/partial line is deferred.
++ */
++static int rd_try_reclaim_full_line(struct ssd *ssd, struct ppa *trigger_ppa)
++{
++    struct ssdparams *spp = &ssd->sp;
++    struct line_mgmt *lm = &ssd->lm;
++    struct nand_block *trigger_blk = get_blk(ssd, trigger_ppa);
++    struct line *line = get_line(ssd, trigger_ppa);
++    struct nand_lun *lunp;
++    struct ppa ppa = *trigger_ppa;
++    uint64_t trigger_reads;
++    int ch, lun, moved_pages = 0;
++
++    if (!spp->rd_enable || spp->rd_reclaim_threshold <= 0 ||
++        trigger_blk->read_cnt < (uint64_t)spp->rd_reclaim_threshold) {
++        return 0;
++    }
++
++    /* The active/partial line cannot be returned to FEMU's free-line list. */
++    if (line == ssd->wp.curline || line->ipc != 0 ||
++        line->vpc != spp->pgs_per_line) {
++        spp->rd_reclaim_deferred++;
++        return 0;
++    }
++
++    trigger_reads = trigger_blk->read_cnt;
++
++    /* A closed line with ipc==0 and all pages valid is on full_line_list. */
++    QTAILQ_REMOVE(&lm->full_line_list, line, entry);
++    lm->full_line_cnt--;
++
++    ppa.g.blk = line->id;
++    ppa.g.pl = 0;
++    for (ch = 0; ch < spp->nchs; ch++) {
++        for (lun = 0; lun < spp->luns_per_ch; lun++) {
++            ppa.g.ch = ch;
++            ppa.g.lun = lun;
++            lunp = get_lun(ssd, &ppa);
++            moved_pages += get_blk(ssd, &ppa)->vpc;
++
++            /* Reuse the same page-copy mechanism as conventional GC. */
++            clean_one_block(ssd, &ppa);
++            mark_block_free(ssd, &ppa);
++
++            if (spp->enable_gc_delay) {
++                struct nand_cmd rde;
++                rde.type = GC_IO;
++                rde.cmd = NAND_ERASE;
++                rde.stime = 0;
++                ssd_advance_status(ssd, &ppa, &rde);
++            }
++            lunp->gc_endtime = lunp->next_lun_avail_time;
++        }
++    }
++
++    mark_line_free(ssd, &ppa);
++    spp->rd_reclaim_events++;
++    spp->rd_reclaim_pages += moved_pages;
++    spp->rd_reclaim_erases += spp->blks_per_line;
++
++    if (spp->rd_debug) {
++        ftl_log("RD reclaim: line=%d trigger_blk=%d reads=%" PRIu64
++                " pages=%d erases=%d events=%" PRIu64 "\n",
++                line->id, trigger_ppa->g.blk, trigger_reads, moved_pages,
++                spp->blks_per_line, spp->rd_reclaim_events);
++        fflush(stdout);
++    }
++    return 1;
++}
++
+ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+ {
+@@ -1014,6 +1093,11 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+         srd.stime = req->stime;
+         sublat = ssd_advance_status(ssd, &ppa, &srd);
+         maxlat = (sublat > maxlat) ? sublat : maxlat;
++
++        /* Schedule reliability-driven data movement after the triggering read. */
++        rd_try_reclaim_full_line(ssd, &ppa);
+     }
+ 
+     return maxlat;
+diff --git a/hw/femu/bbssd/ftl.h b/hw/femu/bbssd/ftl.h
+index 62e38e75a..46aa7848e 100644
+--- a/hw/femu/bbssd/ftl.h
++++ b/hw/femu/bbssd/ftl.h
+@@ -147,6 +147,11 @@ struct ssdparams {
+     double rd_q;
+     uint64_t rd_total_retries;
+     uint64_t rd_retry_events;
++    int rd_reclaim_threshold; /* host reads per block; 0 disables reclaim */
++    uint64_t rd_reclaim_events;
++    uint64_t rd_reclaim_pages;
++    uint64_t rd_reclaim_erases;
++    uint64_t rd_reclaim_deferred;
+ 
+     /* below are all calculated values */
+     int secs_per_blk;
+diff --git a/hw/femu/femu.c b/hw/femu/femu.c
+index 21dd2c6d8..8d4fcd41f 100644
+--- a/hw/femu/femu.c
++++ b/hw/femu/femu.c
+@@ -1025,6 +1025,8 @@ static const Property femu_props[] = {
+     DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
+     DEFINE_PROP_INT32("rd_enable", FemuCtrl, bb_params.rd_enable, 0),
+     DEFINE_PROP_INT32("rd_debug", FemuCtrl, bb_params.rd_debug, 0),
++    DEFINE_PROP_INT32("rd_reclaim_threshold", FemuCtrl,
++                      bb_params.rd_reclaim_threshold, 0),
+     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
+                      NvmeSubsystem *),
+ };
+diff --git a/hw/femu/nvme.h b/hw/femu/nvme.h
+index eb1cf82bb..17ce53a04 100644
+--- a/hw/femu/nvme.h
++++ b/hw/femu/nvme.h
+@@ -1525,6 +1525,7 @@ typedef struct BbCtrlParams {
+     /* Read-disturbance model controls (BlackBox SSD mode). */
+     int rd_enable;
+     int rd_debug;
++    int rd_reclaim_threshold; /* 0 disables read reclaim */
+ } BbCtrlParams;
