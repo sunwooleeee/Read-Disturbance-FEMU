@@ -1,0 +1,26 @@
+Read-Disturbance FEMU read-reclaim smoke test
+Date: 2026-08-27
+Commit under test: b0a85f681
+
+Configuration:
+- 1 channel, 1 LUN, 64 blocks, 256 pages/block
+- 4 KiB page, 48 MiB logical SSD
+- rd_enable=1, rd_debug=1
+- rd_reclaim_threshold=256
+- KVM acceleration
+
+Workload:
+- Fill one complete 256-page line
+- Repeatedly read the same 4 KiB LBA 400 times
+
+Observed:
+- First ECC/read-retry event at read_cnt=177
+- At read_cnt=256, reliability-driven reclaim triggered for line 0
+- Existing GC migration path moved 256 valid pages
+- One block erase completed
+
+Key log:
+RD retry: blk=0 pg=0 reads=177 erase=0 rber=0.00152603 retries=1 total=1
+RD reclaim: line=0 trigger_blk=0 reads=256 pages=256 erases=1 events=1
+
+Result: PASS
